@@ -1,0 +1,28 @@
+services:
+  db:
+    container_name: demo-bd
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: demo-db
+      POSTGRES_USER: demo-user
+      POSTGRES_PASSWORD: demo-password
+    volumes:
+      - db:/var/lib/postgresql/data  # Fixed path: Alpine uses this path for data
+      # This line below creates the 'bank' database automatically on first startup
+    ports:
+      - "5434:5432"
+    networks:
+      - db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d postgres_ems"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  db:
+    driver: bridge
+
+volumes:
+  db:

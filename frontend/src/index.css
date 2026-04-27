@@ -1,0 +1,38 @@
+/* 1. External Fonts FIRST */
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700&display=swap');
+
+/* 2. Tailwind SECOND */
+@import "tailwindcss";
+
+/* 3. Your custom variables and styles THIRD */
+:root {
+  --paper: #faf7f2;
+  --ink: #1c1917;
+  --accent: #b91c1c;
+  --muted: #78716c;
+  --border: #e7e5e4;
+}
+
+body {
+  font-family: 'Manrope', sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  margin: 0;
+}
+
+h1,
+h2,
+h3 {
+  font-family: 'Fraunces', serif;
+  letter-spacing: -0.01em;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+
+  body {
+    background: white;
+  }
+}
