@@ -18,20 +18,69 @@ UPLOAD_ROOT = Path("uploads/submissions")
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
-ALLOWED_EXTENSIONS = {
-    ".pdf", ".doc", ".docx", ".md",
+
+# Master whitelist — security ceiling. A professor's per-assignment list
+# can only be a subset of this; never a superset.
+GLOBAL_ALLOWED_EXTENSIONS = {
+    ".pdf", ".doc", ".docx", ".md", ".txt",
     ".png", ".jpg", ".jpeg",
     ".py", ".js", ".java", ".cpp", ".c", ".ipynb",
+    ".zip",
 }
+# Backwards-compat alias
+ALLOWED_EXTENSIONS = GLOBAL_ALLOWED_EXTENSIONS
 
 
-def _save_upload(file: UploadFile, assignment_id: int, student_id: int) -> tuple[str, str]:
+def _normalize_extensions(exts: list[str] | None) -> list[str] | None:
+    """Validate + clean a professor-supplied list. None / empty -> None (use global)."""
+    if not exts:
+        return None
+    cleaned: list[str] = []
+    for raw in exts:
+        e = raw.strip().lower()
+        if not e.startswith("."):
+            e = "." + e
+        if e not in GLOBAL_ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Extension {e} is not in the allowed list.",
+            )
+        if e not in cleaned:
+            cleaned.append(e)
+    if not cleaned:
+        return None
+    return cleaned
+
+
+def _parse_extensions(stored: str | None) -> list[str] | None:
+    """DB string -> list of extensions. None -> 'no override; use global'."""
+    if not stored:
+        return None
+    parts = [e.strip() for e in stored.split(",") if e.strip()]
+    return parts or None
+
+
+def _effective_allowed(assignment) -> set[str]:
+    """Resolve the actual allowed-set for this assignment."""
+    parsed = _parse_extensions(getattr(assignment, "allowed_extensions", None))
+    if parsed is None:
+        return GLOBAL_ALLOWED_EXTENSIONS
+    return set(parsed)
+
+
+def _save_upload(
+    file: UploadFile,
+    assignment_id: int,
+    student_id: int,
+    allowed: set[str],
+) -> tuple[str, str]:
     """Save upload to disk; return (relative_url_path, original_filename)."""
     ext = Path(file.filename or "").suffix.lower()
-    if ext not in ALLOWED_EXTENSIONS:
+    if ext not in allowed:
+        nice = ", ".join(sorted(allowed)) if allowed else "(none)"
         raise HTTPException(
             status_code=400,
-            detail=f"File type {ext or '(none)'} not allowed.",
+            detail=f"File type {ext or '(none)'} not allowed. Accepted: {nice}.",
         )
 
     data = file.file.read()
@@ -69,6 +118,9 @@ def create_assignment(db: Session, payload: AssignmentCreate, professor_id: int)
     if payload.due_date <= datetime.utcnow():
         raise HTTPException(status_code=400, detail="Due date must be in the future.")
 
+    normalized = _normalize_extensions(payload.allowed_extensions)
+    stored = ",".join(normalized) if normalized else None
+
     new_assignment = assignment_model.Assignment(
         professor_id=professor_id,
         title=payload.title,
@@ -76,6 +128,7 @@ def create_assignment(db: Session, payload: AssignmentCreate, professor_id: int)
         subject=payload.subject,
         due_date=payload.due_date,
         max_marks=payload.max_marks,
+        allowed_extensions=stored,
     )
     try:
         db.add(new_assignment)
@@ -120,6 +173,7 @@ def list_my_assignments(db: Session, professor_id: int):
             "created_at": a.created_at,
             "submission_count": int(count),
             "professor_name": prof_name,
+            "allowed_extensions": _parse_extensions(a.allowed_extensions),
         }
         for a, count in rows
     ]
@@ -134,7 +188,6 @@ def delete_assignment(db: Session, assignment_id: int, professor_id: int):
     if int(a.professor_id) != professor_id:
         raise HTTPException(status_code=403, detail="Not your assignment.")
 
-    # Best-effort cleanup of uploaded files
     folder = UPLOAD_ROOT / str(assignment_id)
     if folder.exists():
         for f in folder.iterdir():
@@ -265,8 +318,6 @@ def list_assignments_for_student(db: Session, student_id: int):
             & (assignment_model.Submission.student_id == student_id),
         )
         .filter(
-            # Show assignments by the professor who created this student.
-            # If created_by is null (e.g. legacy data), fall back to all assignments.
             (assignment_model.Assignment.professor_id == student.created_by)
             if student.created_by is not None
             else (assignment_model.Assignment.id.isnot(None))
@@ -285,6 +336,7 @@ def list_assignments_for_student(db: Session, student_id: int):
             "due_date": a.due_date,
             "max_marks": a.max_marks,
             "professor_name": str(prof_name) if prof_name else None,
+            "allowed_extensions": _parse_extensions(a.allowed_extensions),
             "submission_id": sub.id if sub else None,
             "submitted_at": sub.submitted_at if sub else None,
             "submission_file_name": sub.file_name if sub else None,
@@ -306,14 +358,14 @@ def submit_assignment(
     if not a:
         raise HTTPException(status_code=404, detail="Assignment not found.")
 
-    # naive-vs-aware datetime safety
     due = a.due_date
     if hasattr(due, "tzinfo") and due.tzinfo is not None:
         due = due.replace(tzinfo=None)
     if datetime.utcnow() > due:
         raise HTTPException(status_code=400, detail="The deadline has passed.")
 
-    file_path, file_name = _save_upload(file, assignment_id, student_id)
+    allowed = _effective_allowed(a)
+    file_path, file_name = _save_upload(file, assignment_id, student_id, allowed)
 
     existing = db.query(assignment_model.Submission).filter(
         assignment_model.Submission.assignment_id == assignment_id,

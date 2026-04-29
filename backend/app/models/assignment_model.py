@@ -16,6 +16,7 @@ class Assignment(Base):
     subject = Column(String, nullable=False)
     due_date = Column(DateTime, nullable=False)
     max_marks = Column(Integer, nullable=False, default=100)
+    allowed_extensions = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     submissions = relationship(
