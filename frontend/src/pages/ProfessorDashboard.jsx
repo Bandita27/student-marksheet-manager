@@ -77,7 +77,7 @@ export default function ProfessorDashboard() {
     try {
       const { data } = await api.get(`/professor/assignments/${assignmentId}/submissions`)
       setSubmissions(data)
-    } catch (err) { setError('Failed to load submissions') }
+    } catch { setError('Failed to load submissions') }
   }
 
   useEffect(() => {
@@ -128,28 +128,23 @@ export default function ProfessorDashboard() {
   }
 
   // ---------- Logic: Assignments & Preview ----------
-async function handlePreview(submissionId, filename) {
-  try {
-    setError('');
-    setPreviewUrl(null); // Clear old preview
-    
-    const res = await api.get(`/submissions/${submissionId}/download`, {
-      params: { preview: true }, // Tells FastAPI to use "inline"
-      responseType: 'blob' 
-    });
-
-    // Create the Blob and verify its type
-    const blob = new Blob([res.data], { type: res.headers['content-type'] || 'application/pdf' });
-    const url = window.URL.createObjectURL(blob);
-    
-    console.log("Preview URL created:", url); // Check your F12 console for this
-    setPreviewUrl(url);
-    setPreviewName(filename);
-  } catch (err) {
-    console.error("Preview Error:", err);
-    flash(setError, 'Server error while generating preview.');
+  async function handlePreview(submissionId, filename) {
+    try {
+      setError('');
+      setPreviewUrl(null);
+      const res = await api.get(`/submissions/${submissionId}/download`, {
+        params: { preview: true },
+        responseType: 'blob'
+      });
+      const blob = new Blob([res.data], { type: res.headers['content-type'] || 'application/pdf' });
+      const url = window.URL.createObjectURL(blob);
+      setPreviewUrl(url);
+      setPreviewName(filename);
+    } catch (err) {
+      console.error("Preview Error:", err);
+      flash(setError, 'Server error while generating preview.');
+    }
   }
-}
 
   async function deleteAssignment(id) {
     if (!window.confirm("Delete this assignment and all its submissions?")) return
@@ -166,10 +161,18 @@ async function handlePreview(submissionId, filename) {
         marks_awarded: parseInt(gradeForm.marks_awarded, 10),
         feedback: gradeForm.feedback,
       })
-      flash(setSuccess, 'Grade saved')
+      flash(setSuccess, 'Approved & released to student')
       setGradingId(null)
       loadSubmissions(expandedAssignmentId)
-    } catch { flash(setError, 'Failed to save grade') }
+    } catch (err) { flash(setError, err.response?.data?.detail || 'Failed to save grade') }
+  }
+
+  function startGrading(sub) {
+    setGradingId(sub.id)
+    setGradeForm({
+      marks_awarded: String(sub.marks_awarded ?? sub.ai_suggested_marks ?? ''),
+      feedback: sub.feedback ?? sub.ai_feedback ?? '',
+    })
   }
 
   function toggleExt(ext) {
@@ -192,30 +195,19 @@ async function handlePreview(submissionId, filename) {
 
       {/* PREVIEW MODAL */}
       {previewUrl && (
-  <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/90 backdrop-blur-md p-4">
-    <div className="bg-white w-full h-full max-w-5xl rounded-xl overflow-hidden flex flex-col">
-      <div className="p-4 border-b flex justify-between items-center">
-        <span className="font-bold">{previewName}</span>
-        <button 
-          onClick={() => { window.URL.revokeObjectURL(previewUrl); setPreviewUrl(null); }} 
-          className="px-4 py-2 bg-red-600 text-white rounded shadow-lg"
-        >
-          Close
-        </button>
-      </div>
-      
-      {/* Try <embed> instead of <iframe> - it is more reliable for PDFs */}
-      <div className="flex-1 overflow-hidden">
-        <embed 
-          src={previewUrl} 
-          type="application/pdf" 
-          width="100%" 
-          height="100%" 
-        />
-      </div>
-    </div>
-  </div>
-)}
+        <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
+          <div className="bg-white w-full h-full max-w-6xl rounded-2xl overflow-hidden flex flex-col shadow-2xl">
+            <div className="p-4 border-b flex justify-between items-center bg-stone-50">
+              <span className="font-bold">Viewing: {previewName}</span>
+              <button onClick={() => { window.URL.revokeObjectURL(previewUrl); setPreviewUrl(null); }}
+                className="px-6 py-2 bg-stone-900 text-white rounded-lg text-sm">Close</button>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <embed src={previewUrl} type="application/pdf" width="100%" height="100%" />
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="max-w-6xl mx-auto px-6 py-10">
         <div className="flex gap-2 mb-8 border-b">
@@ -263,8 +255,18 @@ async function handlePreview(submissionId, filename) {
                       <div key={m.id} className="flex justify-between items-center py-2">
                         <span className="text-sm">{m.subject}</span>
                         <div className="flex gap-3 items-center">
-                           <span className="font-mono text-sm">{m.marks_obtained}</span>
-                           <button onClick={() => { setEditingMarkId(m.id); setEditValue(m.marks_obtained) }} className="text-[10px] underline">Edit</button>
+                          {editingMarkId === m.id ? (
+                            <>
+                              <input type="number" min="0" max="100" value={editValue} onChange={(e) => setEditValue(e.target.value)} className="w-16 px-2 py-1 border rounded text-sm font-mono" />
+                              <button onClick={() => saveMarkEdit(m.id)} className="text-[10px] bg-stone-900 text-white px-2 py-1 rounded">Save</button>
+                              <button onClick={() => setEditingMarkId(null)} className="text-[10px] underline">X</button>
+                            </>
+                          ) : (
+                            <>
+                              <span className="font-mono text-sm">{m.marks_obtained}</span>
+                              <button onClick={() => { setEditingMarkId(m.id); setEditValue(m.marks_obtained) }} className="text-[10px] underline">Edit</button>
+                            </>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -317,15 +319,20 @@ async function handlePreview(submissionId, filename) {
               }} className="bg-white border rounded-lg p-4 space-y-3">
                 <input type="text" placeholder="Title" value={assignmentForm.title} onChange={(e) => setAssignmentForm({...assignmentForm, title: e.target.value})} className="w-full p-2 border rounded text-sm" required />
                 <textarea placeholder="Description" value={assignmentForm.description} onChange={(e) => setAssignmentForm({...assignmentForm, description: e.target.value})} className="w-full p-2 border rounded text-sm" />
+                <select value={assignmentForm.subject} onChange={(e) => setAssignmentForm({...assignmentForm, subject: e.target.value})} className="w-full p-2 border rounded text-sm bg-white" required>
+                  <option value="">Select subject</option>
+                  {SUBJECTS.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
                 <div className="flex flex-wrap gap-2 py-2">
-                    {FILE_TYPE_GROUPS.flatMap(g => g.exts).map(ext => (
-                      <button type="button" key={ext} onClick={() => toggleExt(ext)}
-                        className={`text-[10px] px-2 py-1 rounded border ${assignmentForm.allowed_extensions.includes(ext) ? 'bg-stone-900 text-white' : 'bg-white'}`}>
-                        {ext}
-                      </button>
-                    ))}
+                  {FILE_TYPE_GROUPS.flatMap(g => g.exts).map(ext => (
+                    <button type="button" key={ext} onClick={() => toggleExt(ext)}
+                      className={`text-[10px] px-2 py-1 rounded border ${assignmentForm.allowed_extensions.includes(ext) ? 'bg-stone-900 text-white' : 'bg-white'}`}>
+                      {ext}
+                    </button>
+                  ))}
                 </div>
                 <input type="datetime-local" value={assignmentForm.due_date} onChange={(e) => setAssignmentForm({...assignmentForm, due_date: e.target.value})} className="w-full p-2 border rounded text-sm" required />
+                <input type="number" placeholder="Max marks" min="1" max="1000" value={assignmentForm.max_marks} onChange={(e) => setAssignmentForm({...assignmentForm, max_marks: e.target.value})} className="w-full p-2 border rounded text-sm" required />
                 <button className="w-full py-2 bg-stone-900 text-white rounded text-sm">Post</button>
               </form>
             </section>
@@ -338,26 +345,110 @@ async function handlePreview(submissionId, filename) {
                     <button onClick={() => { setExpandedAssignmentId(expandedAssignmentId === a.id ? null : a.id); loadSubmissions(a.id); }} className="text-left flex-1">
                       <div className="font-bold">{a.title}</div>
                       <div className="text-xs text-stone-500">{a.subject} • Due {fmtDate(a.due_date)}</div>
+                      {a.allowed_extensions && a.allowed_extensions.length > 0 && (
+                        <div className="text-xs text-stone-500 mt-1">Accepts: {a.allowed_extensions.join(', ')}</div>
+                      )}
                     </button>
                     <button onClick={() => deleteAssignment(a.id)} className="text-red-500 text-xs px-2">Delete</button>
                   </div>
                   {expandedAssignmentId === a.id && (
                     <div className="p-4 bg-stone-50 border-t space-y-3">
-                      {submissions.map((sub) => (
-                        <div key={sub.id} className="bg-white border p-3 rounded-lg flex items-center justify-between">
-                          <span className="text-sm font-bold">{sub.student_name}</span>
-                          <div className="flex gap-4">
-                            <button onClick={() => handlePreview(sub.id, sub.file_name)} className="text-xs bg-stone-100 px-3 py-1 rounded hover:bg-stone-200">Preview</button>
-                            <button onClick={() => setGradingId(sub.id)} className="text-xs underline">Grade</button>
-                          </div>
-                          {gradingId === sub.id && (
-                            <div className="absolute bg-white p-4 border shadow-xl rounded-lg">
-                               <input type="number" placeholder="Marks" value={gradeForm.marks_awarded} onChange={(e) => setGradeForm({...gradeForm, marks_awarded: e.target.value})} className="border p-1" />
-                               <button onClick={() => saveGrade(sub.id)} className="bg-black text-white px-2 ml-2">Save</button>
+                      {submissions.length === 0 && (
+                        <div className="text-sm text-stone-500">No submissions yet.</div>
+                      )}
+                      {submissions.map((sub) => {
+                        const approved = sub.grade_status === 'approved'
+                        const isGrading = gradingId === sub.id
+
+                        return (
+                          <div key={sub.id} className="bg-white border p-3 rounded-lg space-y-2">
+                            <div className="flex items-center justify-between">
+                              <div>
+                                <span className="text-sm font-bold">{sub.student_name}</span>
+                                <span className={`ml-2 text-xs px-2 py-0.5 rounded ${
+                                  approved ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+                                }`}>
+                                  {approved ? 'Approved' : 'Pending review'}
+                                </span>
+                              </div>
+                              <div className="flex gap-2">
+                                <button onClick={() => handlePreview(sub.id, sub.file_name)} className="text-xs bg-stone-100 px-3 py-1 rounded hover:bg-stone-200">
+                                  Preview
+                                </button>
+                                {!isGrading && (
+                                  <button onClick={() => startGrading(sub)} className="text-xs bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">
+                                    {approved ? 'Edit grade' : 'Review & approve'}
+                                  </button>
+                                )}
+                              </div>
                             </div>
-                          )}
-                        </div>
-                      ))}
+
+                            {/* AI suggestion (visible when not currently editing) */}
+                            {sub.ai_feedback && !isGrading && (
+                              <div className="p-3 bg-blue-50 border border-blue-100 rounded text-xs">
+                                <div className="font-semibold mb-1">
+                                  ✦ AI suggestion
+                                  {sub.ai_suggested_marks != null && (
+                                    <span className="ml-2 font-mono">{sub.ai_suggested_marks}</span>
+                                  )}
+                                </div>
+                                <div className="text-stone-700 whitespace-pre-wrap">{sub.ai_feedback}</div>
+                              </div>
+                            )}
+
+                            {/* Approved grade banner */}
+                            {approved && !isGrading && (
+                              <div className="p-3 bg-green-50 border border-green-100 rounded text-xs">
+                                <div className="font-semibold mb-1">
+                                  ✓ Approved grade
+                                  <span className="ml-2 font-mono">{sub.marks_awarded}</span>
+                                </div>
+                                {sub.feedback && (
+                                  <div className="text-stone-700 whitespace-pre-wrap">{sub.feedback}</div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Edit form */}
+                            {isGrading && (
+                              <div className="pt-2 border-t border-stone-200 space-y-2">
+                                <div className="text-xs text-stone-600">
+                                  Pre-filled from AI suggestion — edit if needed, then approve.
+                                </div>
+                                <input
+                                  type="number"
+                                  placeholder="Marks"
+                                  min="0"
+                                  value={gradeForm.marks_awarded}
+                                  onChange={(e) => setGradeForm({...gradeForm, marks_awarded: e.target.value})}
+                                  className="w-full p-2 border rounded text-sm font-mono"
+                                />
+                                <textarea
+                                  placeholder="Feedback"
+                                  value={gradeForm.feedback}
+                                  onChange={(e) => setGradeForm({...gradeForm, feedback: e.target.value})}
+                                  rows={3}
+                                  className="w-full p-2 border rounded text-sm resize-none"
+                                />
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={() => saveGrade(sub.id)}
+                                    className="flex-1 py-1.5 bg-green-700 text-white rounded text-xs hover:bg-green-800"
+                                  >
+                                    Approve & release to student
+                                  </button>
+                                  <button
+                                    onClick={() => setGradingId(null)}
+                                    className="px-3 text-xs text-stone-500 hover:underline"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
                     </div>
                   )}
                 </div>

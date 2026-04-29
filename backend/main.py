@@ -6,6 +6,9 @@ from app.cors.database import Base, engine,get_db
 from app.routes import  student_router
 app = FastAPI()
 from fastapi.staticfiles import StaticFiles
+from dotenv import load_dotenv
+
+load_dotenv()
 
 Base.metadata.create_all(bind=engine)
 

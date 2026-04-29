@@ -38,8 +38,17 @@ class Submission(Base):
     file_path = Column(String, nullable=False)
     file_name = Column(String, nullable=False)
     submitted_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # AI's draft (set automatically on upload)
+    ai_suggested_marks = Column(Integer, nullable=True)
+    ai_feedback = Column(Text, nullable=True)
+
+    # Professor's approved grade (only set when grade_status='approved')
     marks_awarded = Column(Integer, nullable=True)
     feedback = Column(Text, nullable=True)
     graded_at = Column(DateTime, nullable=True)
+
+    # 'pending' | 'approved'
+    grade_status = Column(String, nullable=False, default="pending")
 
     assignment = relationship("Assignment", back_populates="submissions")

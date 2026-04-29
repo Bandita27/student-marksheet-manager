@@ -25,7 +25,30 @@ class AssignmentResponse(BaseModel):
     class Config:
         from_attributes = True
 
-# We keep this one (it has all the fields)
+class SubmissionResponse(BaseModel):
+    id: int
+    assignment_id: int
+    student_id: int
+    student_name: str
+    file_name: str
+    file_path: str
+    submitted_at: datetime
+    ai_suggested_marks: int | None = None
+    ai_feedback: str | None = None
+    marks_awarded: int | None = None
+    feedback: str | None = None
+    graded_at: datetime | None = None
+    grade_status: str = "pending"
+
+    class Config:
+        from_attributes = True
+
+
+class GradeUpdate(BaseModel):
+    marks_awarded: int = Field(..., ge=0)
+    feedback: str | None = None
+
+
 class StudentAssignmentView(BaseModel):
     id: int
     title: str
@@ -39,28 +62,6 @@ class StudentAssignmentView(BaseModel):
     submission_id: int | None = None
     submitted_at: datetime | None = None
     submission_file_name: str | None = None
-    marks_awarded: int | None = None
-    feedback: str | None = None
-
-    class Config:
-        from_attributes = True
-
-# ---------- Submission ----------
-class SubmissionResponse(BaseModel):
-    id: int
-    assignment_id: int
-    student_id: int
-    student_name: str
-    file_name: str
-    file_path: str
-    submitted_at: datetime
-    marks_awarded: int | None = None
-    feedback: str | None = None
-    graded_at: datetime | None = None
-
-    class Config:
-        from_attributes = True
-
-class GradeUpdate(BaseModel):
-    marks_awarded: int = Field(..., ge=0)
+    grade_status: str | None = None        # NEW
+    marks_awarded: int | None = None       # only populated if grade_status='approved'
     feedback: str | None = None

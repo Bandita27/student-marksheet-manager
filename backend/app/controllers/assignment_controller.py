@@ -1,8 +1,11 @@
-# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false, reportGeneralTypeIssues=false
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false, reportGeneralTypeIssues=false, reportPrivateImportUsage=false
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
 
+from dotenv import load_dotenv
+import google.generativeai as genai
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, UploadFile
@@ -11,6 +14,8 @@ from app.models import admin_model, assignment_model
 from app.schemas.assignment_schemas import (
     AssignmentCreate, GradeUpdate,
 )
+
+load_dotenv()
 
 
 # ---------- File upload config ----------
@@ -30,6 +35,79 @@ GLOBAL_ALLOWED_EXTENSIONS = {
 # Backwards-compat alias
 ALLOWED_EXTENSIONS = GLOBAL_ALLOWED_EXTENSIONS
 
+# ---------- Gemini config ----------
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+TEXT_EXTENSIONS = {".txt", ".md", ".py", ".js", ".java", ".cpp", ".c", ".ipynb"}
+PDF_EXTENSIONS = {".pdf"}
+
+
+def _run_ai_eval(assignment, submission, db) -> dict | None:
+    """Run Gemini on a submission. Returns {suggested_marks, feedback} or None on failure."""
+    if not GEMINI_API_KEY:
+        return None
+
+    fp = str(submission.file_path)
+    disk_path = Path("." + fp) if fp.startswith("/") else Path(fp)
+    if not disk_path.exists():
+        return None
+
+    ext = disk_path.suffix.lower()
+
+    student = db.query(admin_model.Admin).filter(
+        admin_model.Admin.id == submission.student_id
+    ).first()
+    student_name = str(student.name) if student else "Student"
+
+    instruction = (
+        f"You are grading a student assignment.\n\n"
+        f"ASSIGNMENT TITLE: {assignment.title}\n"
+        f"SUBJECT: {assignment.subject}\n"
+        f"INSTRUCTIONS: {assignment.description or '(none provided)'}\n"
+        f"MAX MARKS: {assignment.max_marks}\n"
+        f"STUDENT: {student_name}\n\n"
+        f"Evaluate the submission. Respond in EXACTLY this format, no extra text:\n\n"
+        f"MARKS: <integer between 0 and {assignment.max_marks}>\n"
+        f"FEEDBACK: <2-4 sentences explaining the grade>\n"
+    )
+
+    model = genai.GenerativeModel("gemini-2.5-flash")
+
+    try:
+        if ext in PDF_EXTENSIONS:
+            uploaded = genai.upload_file(path=str(disk_path))
+            response = model.generate_content([instruction, uploaded])
+        elif ext in TEXT_EXTENSIONS:
+            content = disk_path.read_text(encoding="utf-8", errors="replace")
+            if len(content) > 200_000:
+                content = content[:200_000] + "\n[...truncated...]"
+            response = model.generate_content(
+                f"{instruction}\n\nSTUDENT SUBMISSION:\n```\n{content}\n```"
+            )
+        else:
+            return None
+    except Exception as e:
+        print(f"Gemini error: {e}")
+        return None
+
+    raw = (response.text or "").strip()
+
+    suggested_marks = None
+    feedback = raw
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.upper().startswith("MARKS:"):
+            digits = "".join(c for c in line.split(":", 1)[1] if c.isdigit())
+            suggested_marks = int(digits) if digits else None
+        elif line.upper().startswith("FEEDBACK:"):
+            feedback = line.split(":", 1)[1].strip()
+
+    if suggested_marks is not None:
+        suggested_marks = max(0, min(int(assignment.max_marks), suggested_marks))
+
+    return {"suggested_marks": suggested_marks, "feedback": feedback}
 
 def _normalize_extensions(exts: list[str] | None) -> list[str] | None:
     """Validate + clean a professor-supplied list. None / empty -> None (use global)."""
@@ -235,9 +313,12 @@ def list_submissions(db: Session, assignment_id: int, professor_id: int):
             "file_name": s.file_name,
             "file_path": s.file_path,
             "submitted_at": s.submitted_at,
+            "ai_suggested_marks": s.ai_suggested_marks,
+            "ai_feedback": s.ai_feedback,
             "marks_awarded": s.marks_awarded,
             "feedback": s.feedback,
             "graded_at": s.graded_at,
+            "grade_status": s.grade_status,
         }
         for s, name in rows
     ]
@@ -265,6 +346,7 @@ def grade_submission(db: Session, submission_id: int, payload: GradeUpdate, prof
     setattr(sub, "marks_awarded", payload.marks_awarded)
     setattr(sub, "feedback", payload.feedback)
     setattr(sub, "graded_at", datetime.utcnow())
+    setattr(sub, "grade_status", "approved")   # NEW: this is what unlocks it for the student
 
     try:
         db.commit()
@@ -285,9 +367,12 @@ def grade_submission(db: Session, submission_id: int, payload: GradeUpdate, prof
         "file_name": sub.file_name,
         "file_path": sub.file_path,
         "submitted_at": sub.submitted_at,
+        "ai_suggested_marks": sub.ai_suggested_marks,
+        "ai_feedback": sub.ai_feedback,
         "marks_awarded": sub.marks_awarded,
         "feedback": sub.feedback,
         "graded_at": sub.graded_at,
+        "grade_status": sub.grade_status,
     }
 
 
@@ -340,8 +425,9 @@ def list_assignments_for_student(db: Session, student_id: int):
             "submission_id": sub.id if sub else None,
             "submitted_at": sub.submitted_at if sub else None,
             "submission_file_name": sub.file_name if sub else None,
-            "marks_awarded": sub.marks_awarded if sub else None,
-            "feedback": sub.feedback if sub else None,
+            "grade_status": sub.grade_status if sub else None,
+            "marks_awarded": (sub.marks_awarded if sub and sub.grade_status == "approved" else None),
+            "feedback": (sub.feedback if sub and sub.grade_status == "approved" else None),
         })
     return out
 
@@ -378,9 +464,13 @@ def submit_assignment(
             setattr(existing, "file_path", file_path)
             setattr(existing, "file_name", file_name)
             setattr(existing, "submitted_at", datetime.utcnow())
+            # Reset everything because it's a new submission
             setattr(existing, "marks_awarded", None)
             setattr(existing, "feedback", None)
             setattr(existing, "graded_at", None)
+            setattr(existing, "ai_suggested_marks", None)
+            setattr(existing, "ai_feedback", None)
+            setattr(existing, "grade_status", "pending")
             db.commit()
             db.refresh(existing)
             sub = existing
@@ -390,6 +480,7 @@ def submit_assignment(
                 student_id=student_id,
                 file_path=file_path,
                 file_name=file_name,
+                grade_status="pending",
             )
             db.add(sub)
             db.commit()
@@ -398,6 +489,18 @@ def submit_assignment(
         db.rollback()
         print(f"Error: {e}")
         raise HTTPException(status_code=500, detail="Failed to save submission")
+
+    # Run AI evaluation in the background (don't block the upload response)
+    # If AI fails, the submission still saves — professor can still grade manually
+    try:
+        ai_result = _run_ai_eval(a, sub, db)
+        if ai_result:
+            setattr(sub, "ai_suggested_marks", ai_result.get("suggested_marks"))
+            setattr(sub, "ai_feedback", ai_result.get("feedback"))
+            db.commit()
+            db.refresh(sub)
+    except Exception as e:
+        print(f"AI auto-eval failed (non-fatal): {e}")
 
     student = db.query(admin_model.Admin).filter(
         admin_model.Admin.id == student_id
@@ -410,12 +513,13 @@ def submit_assignment(
         "file_name": sub.file_name,
         "file_path": sub.file_path,
         "submitted_at": sub.submitted_at,
+        "ai_suggested_marks": sub.ai_suggested_marks,
+        "ai_feedback": sub.ai_feedback,
         "marks_awarded": sub.marks_awarded,
         "feedback": sub.feedback,
         "graded_at": sub.graded_at,
+        "grade_status": sub.grade_status,
     }
-
-
 # ===================================================================
 # Auth-checked download (used by both student and professor)
 # ===================================================================

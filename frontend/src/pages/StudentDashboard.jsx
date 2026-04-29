@@ -109,9 +109,9 @@ export default function StudentDashboard() {
   }
 
   function statusOf(a) {
-    if (a.marks_awarded != null) return 'graded'
-    if (a.submitted_at) return 'submitted'
-    return 'pending'
+  if (a.marks_awarded != null && a.grade_status === 'approved') return 'graded'
+  if (a.submitted_at) return 'submitted'
+  return 'pending'
   }
 
   function dueState(a) {
@@ -337,21 +337,21 @@ export default function StudentDashboard() {
                                   </div>
                                   <div className="border-2 border-dashed border-stone-300 rounded-lg p-4 bg-white mb-3">
                                     <input
-  ref={fileInputRef}
-  type="file"
-  onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
-  accept={
-    a.allowed_extensions && a.allowed_extensions.length > 0
-      ? a.allowed_extensions.join(',')
-      : '.pdf,.doc,.docx,.txt,.md,.png,.jpg,.jpeg,.zip,.py,.js,.java,.cpp,.c,.ipynb'
-  }
-  className="block w-full text-sm text-stone-700
-    file:mr-3 file:py-2 file:px-4
-    file:rounded file:border-0
-    file:text-sm file:font-medium
-    file:bg-stone-900 file:text-white
-    hover:file:bg-stone-700 cursor-pointer"
-/>
+                                      ref={fileInputRef}
+                                      type="file"
+                                      onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
+                                      accept={
+                                        a.allowed_extensions && a.allowed_extensions.length > 0
+                                          ? a.allowed_extensions.join(',')
+                                          : '.pdf,.doc,.docx,.txt,.md,.png,.jpg,.jpeg,.zip,.py,.js,.java,.cpp,.c,.ipynb'
+                                      }
+                                      className="block w-full text-sm text-stone-700
+                                        file:mr-3 file:py-2 file:px-4
+                                        file:rounded file:border-0
+                                        file:text-sm file:font-medium
+                                        file:bg-stone-900 file:text-white
+                                        hover:file:bg-stone-700 cursor-pointer"
+                                    />
                                     {selectedFile && (
                                       <div className="mt-3 text-xs text-stone-600 flex items-center justify-between">
                                         <span className="truncate">
@@ -368,11 +368,11 @@ export default function StudentDashboard() {
                                     )}
                                   </div>
                                   <div className="text-xs text-stone-500 mb-3">
-  Max 10 MB. Accepted:{' '}
-  {a.allowed_extensions && a.allowed_extensions.length > 0
-    ? a.allowed_extensions.join(', ')
-    : 'PDF, DOC, DOCX, images, ZIP, code files'}.
-</div>
+                                    Max 10 MB. Accepted:{' '}
+                                    {a.allowed_extensions && a.allowed_extensions.length > 0
+                                      ? a.allowed_extensions.join(', ')
+                                      : 'PDF, DOC, DOCX, images, ZIP, code files'}.
+                                  </div>
                                   <div className="flex gap-2">
                                     <button
                                       onClick={() => submitAssignment(a.id)}
