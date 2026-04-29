@@ -1,17 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from app.routes import admin_router, auth_router, professor_router
-
+from app.routes import admin_router, auth_router, professor_router,assignment_router
 from app.cors.database import Base, engine,get_db
 from app.routes import  student_router
 app = FastAPI()
-
-
-
+from fastapi.staticfiles import StaticFiles
 
 Base.metadata.create_all(bind=engine)
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,12 +17,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # Register routers
 app.include_router(auth_router.router)
 app.include_router(admin_router.router)
 app.include_router(professor_router.router)
 app.include_router(student_router.router)
+app.include_router(assignment_router.router)
 
 
 @app.get("/")
