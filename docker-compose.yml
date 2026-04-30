@@ -1,28 +1,39 @@
+version: '3.8'
+
 services:
+
   db:
-    container_name: demo-bd
-    image: postgres:15-alpine
+    image: postgres:15
+    container_name: smm-db
     environment:
-      POSTGRES_DB: demo-db
-      POSTGRES_USER: demo-user
-      POSTGRES_PASSWORD: demo-password
-    volumes:
-      - db:/var/lib/postgresql/data  # Fixed path: Alpine uses this path for data
-      # This line below creates the 'bank' database automatically on first startup
+      POSTGRES_USER: smm-user
+      POSTGRES_PASSWORD: smm-password
+      POSTGRES_DB: smm-db
     ports:
       - "5434:5432"
-    networks:
-      - db
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d postgres_ems"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
 
-networks:
-  db:
-    driver: bridge
+  backend:
+    build: ./backend
+    container_name: smm-backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://smm-user:smm-password@db:5432/smm-db
+      GEMINI_API_KEY: AIzaSyBnJflrFy27dYeHngEgxR8no22dv-d94Z8
+    depends_on:
+      - db
+    volumes:
+      - ./backend/uploads:/app/uploads   # persist uploaded files
+
+  frontend:
+    build: ./frontend
+    container_name: smm-frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
 
 volumes:
-  db:
+  postgres_data:

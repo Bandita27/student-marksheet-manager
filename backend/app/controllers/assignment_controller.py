@@ -1,4 +1,5 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false, reportGeneralTypeIssues=false, reportPrivateImportUsage=false
+import json
 import re
 import time
 import uuid
@@ -15,40 +16,33 @@ from app.models import admin_model, assignment_model
 from app.schemas.assignment_schemas import AssignmentCreate, GradeUpdate
 
 
-# ---------------------------------------------------------------
-# Hardcoded API key 
-# ---------------------------------------------------------------
-GEMINI_API_KEY = "AIzaSyDJHo2wJkOThcs0rZVaLuvvwZFW0Qw3hTk"
+# ── Hardcoded API key ────────────────────────────────────────────────
+GEMINI_API_KEY = "AIzaSyBnJflrFy27dYeHngEgxR8no22dv-d94Z8"  
 
-print("[AI] API key prefix=" + GEMINI_API_KEY[:8] + " len=" + str(len(GEMINI_API_KEY)))
+print("[AI] key prefix=" + GEMINI_API_KEY[:8] + " len=" + str(len(GEMINI_API_KEY)))
 
-# ---------------------------------------------------------------
-# Single client instance (created once, reused)
-# ---------------------------------------------------------------
 _gemini_client: genai.Client | None = None
 
 
-def _get_client() -> genai.Client:                  # only ONE definition
+def _get_client() -> genai.Client:
     global _gemini_client
     if _gemini_client is None:
         _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
     return _gemini_client
 
 
-# ---------------------------------------------------------------
-# Model priority — tried in order on quota / rate-limit errors
-# ---------------------------------------------------------------
+# ── Model priority ───────────────────────────────────────────────────
 GEMINI_MODEL_PRIORITY = [
-    "gemini-2.5-flash-lite",   # primary — fast & cheap
-    "gemini-1.5-flash",        # fallback — solid free tier
-    "gemini-1.5-flash-8b",     # last resort — highest free quota
+    "gemini-2.5-flash-lite",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
 ]
 
-# ---------- File upload config ----------
+# ── File config ──────────────────────────────────────────────────────
 UPLOAD_ROOT = Path("uploads/submissions")
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+MAX_FILE_SIZE = 10 * 1024 * 1024
 
 GLOBAL_ALLOWED_EXTENSIONS = {
     ".pdf", ".doc", ".docx", ".md", ".txt",
@@ -69,54 +63,143 @@ _EXT_MIME: dict[str, str] = {
     ".jpeg": "image/jpeg",
 }
 
+GRADING_MODES: dict[str, str] = {
+    "strict":   "Be very strict. Penalize every mistake, poor naming, and missing edge cases.",
+    "balanced": "Grade fairly. Reward correct logic even if syntax has minor issues.",
+    "lenient":  "Be encouraging. Reward effort and partial correctness generously.",
+}
+
 
 # ===================================================================
-# Internal helpers
+# Prompt builder — uses professor's rubric + mode + instructions
 # ===================================================================
-
-def _resolve_disk_path(file_path_str: str) -> Path:
-    fp = str(file_path_str)
-    return Path("." + fp) if fp.startswith("/") else Path(fp)
-
 
 def _build_prompt(assignment, student_name: str) -> str:
-    return (
-        f"You are grading a student assignment.\n\n"
-        f"ASSIGNMENT TITLE: {assignment.title}\n"
-        f"SUBJECT: {assignment.subject}\n"
-        f"INSTRUCTIONS: {assignment.description or '(none provided)'}\n"
-        f"MAX MARKS: {assignment.max_marks}\n"
-        f"STUDENT: {student_name}\n\n"
-        f"Evaluate the submission carefully. "
-        f"Respond in EXACTLY this format with NO extra text:\n\n"
-        f"MARKS: <integer between 0 and {assignment.max_marks}>\n"
-        f"FEEDBACK: <2-4 sentences explaining the grade>\n"
+    mode_text = GRADING_MODES.get(
+        str(assignment.grading_mode or "balanced"),
+        GRADING_MODES["balanced"],
     )
 
+    # Parse rubric JSON stored by professor
+    rubric_items: list[dict] = []
+    if assignment.rubric:
+        try:
+            rubric_items = json.loads(str(assignment.rubric))
+        except Exception:
+            rubric_items = []
+
+    custom_instructions = str(assignment.grading_instructions or "").strip()
+
+    # ── Build rubric block ──────────────────────────────────────────
+    if rubric_items:
+        rubric_lines = "\n".join(
+            "  - " + item["criteria"] + ": " + str(item["max_marks"]) + " marks"
+            for item in rubric_items
+        )
+        rubric_section = "PROFESSOR RUBRIC (evaluate EACH criterion separately):\n" + rubric_lines
+
+        format_lines = "\n".join(
+            "CRITERIA: " + item["criteria"]
+            + " | MARKS: <0-" + str(item["max_marks"]) + ">"
+            + " | REASON: <one sentence>"
+            for item in rubric_items
+        )
+    else:
+        # Default rubric — split max_marks across three areas
+        total = int(assignment.max_marks)
+        c1 = round(total * 0.5)
+        c2 = round(total * 0.3)
+        c3 = total - c1 - c2
+
+        rubric_section = (
+            "RUBRIC (default — evaluate each):\n"
+            "  - Correctness: "    + str(c1) + " marks\n"
+            "  - Code Quality: "   + str(c2) + " marks\n"
+            "  - Documentation: "  + str(c3) + " marks"
+        )
+        format_lines = (
+            "CRITERIA: Correctness | MARKS: <0-"    + str(c1) + "> | REASON: <one sentence>\n"
+            "CRITERIA: Code Quality | MARKS: <0-"   + str(c2) + "> | REASON: <one sentence>\n"
+            "CRITERIA: Documentation | MARKS: <0-"  + str(c3) + "> | REASON: <one sentence>"
+        )
+
+    # ── Build full prompt ───────────────────────────────────────────
+    prompt = (
+        "You are an experienced professor grading a student assignment.\n\n"
+        "ASSIGNMENT : " + str(assignment.title) + "\n"
+        "SUBJECT    : " + str(assignment.subject) + "\n"
+        "DESCRIPTION: " + str(assignment.description or "(none)") + "\n"
+        "MAX MARKS  : " + str(assignment.max_marks) + "\n"
+        "STUDENT    : " + student_name + "\n\n"
+        "GRADING MODE: " + mode_text + "\n\n"
+        + rubric_section + "\n\n"
+    )
+
+    if custom_instructions:
+        prompt += "PROFESSOR'S CUSTOM INSTRUCTIONS:\n" + custom_instructions + "\n\n"
+
+    prompt += (
+        "Respond in EXACTLY this format — no extra lines, no markdown:\n\n"
+        + format_lines + "\n"
+        "TOTAL: <integer 0-" + str(assignment.max_marks) + ">\n"
+        "SUMMARY: <2-3 sentences of overall feedback for the student>\n"
+    )
+
+    return prompt
+
+
+# ===================================================================
+# Response parser — handles the CRITERIA / TOTAL / SUMMARY format
+# ===================================================================
 
 def _parse_ai_response(raw: str, max_marks: int) -> dict:
-    suggested_marks = None
-    feedback = raw.strip()
+    breakdown: list[dict] = []
+    total: int | None = None
+    summary = ""
+
     for line in raw.splitlines():
         stripped = line.strip()
-        if stripped.upper().startswith("MARKS:"):
+
+        if stripped.upper().startswith("CRITERIA:"):
+            try:
+                parts = [p.strip() for p in stripped.split("|")]
+                criteria  = parts[0].split(":", 1)[1].strip()
+                marks_raw = parts[1].split(":", 1)[1].strip()
+                marks_val = int(marks_raw.split("/")[0].strip())
+                reason    = parts[2].split(":", 1)[1].strip() if len(parts) > 2 else ""
+                breakdown.append({
+                    "criteria": criteria,
+                    "marks":    marks_val,
+                    "reason":   reason,
+                })
+            except Exception:
+                pass
+
+        elif stripped.upper().startswith("TOTAL:"):
             digits = "".join(c for c in stripped.split(":", 1)[1] if c.isdigit())
             if digits:
-                suggested_marks = max(0, min(max_marks, int(digits)))
-        elif stripped.upper().startswith("FEEDBACK:"):
-            feedback = stripped.split(":", 1)[1].strip()
-    return {"suggested_marks": suggested_marks, "feedback": feedback}
+                total = max(0, min(max_marks, int(digits)))
 
+        elif stripped.upper().startswith("SUMMARY:"):
+            summary = stripped.split(":", 1)[1].strip()
+
+    # Fallback total — sum the breakdown
+    if total is None and breakdown:
+        total = max(0, min(max_marks, sum(item["marks"] for item in breakdown)))
+
+    return {
+        "suggested_marks": total,
+        "feedback":        summary,
+        "breakdown":       breakdown,
+    }
+
+
+# ===================================================================
+# Gemini call with model fallback
+# ===================================================================
 
 def _call_gemini_with_fallback(contents: list, max_marks: int) -> dict | None:
-    """
-    Try each model in GEMINI_MODEL_PRIORITY.
-    On 429 / quota errors, waits then tries the next model.
-    """
     client = _get_client()
-
-    # GenerateContentConfig — temperature passed as positional dict
-    # to avoid Pylance false-positive on the 'temperature' kwarg
     gen_config = genai_types.GenerateContentConfig(  # type: ignore[call-arg]
         temperature=0.2
     )
@@ -130,10 +213,10 @@ def _call_gemini_with_fallback(contents: list, max_marks: int) -> dict | None:
             )
             raw = (response.text or "").strip()
             if not raw:
-                print("[AI] " + model_name + " returned empty — trying next model.")
+                print("[AI] " + model_name + " empty response — trying next.")
                 continue
 
-            print("[AI] Success with model: " + model_name)
+            print("[AI] Success: " + model_name)
             return _parse_ai_response(raw, max_marks)
 
         except Exception as e:
@@ -149,18 +232,20 @@ def _call_gemini_with_fallback(contents: list, max_marks: int) -> dict | None:
                 m = re.search(r"seconds:\s*(\d+)", err_str)
                 if m:
                     wait = min(int(m.group(1)), 15)
-                print("[AI] " + model_name + " quota hit. Waiting " + str(wait) + "s then trying next model.")
+                print("[AI] " + model_name + " quota hit — waiting " + str(wait) + "s.")
                 time.sleep(wait)
                 continue
-
             print("[AI] " + model_name + " error: " + str(e))
             continue
 
     return None
 
 
+# ===================================================================
+# Core AI eval
+# ===================================================================
+
 def _run_ai_eval(assignment, submission, db) -> dict | None:
-    """Build prompt and call Gemini with automatic model fallback."""
     disk_path = _resolve_disk_path(str(submission.file_path))
     if not disk_path.exists():
         print("[AI] File not found: " + str(disk_path))
@@ -168,20 +253,19 @@ def _run_ai_eval(assignment, submission, db) -> dict | None:
 
     ext = disk_path.suffix.lower()
     if ext not in (TEXT_EXTENSIONS | PDF_EXTENSIONS | IMAGE_EXTENSIONS):
-        print("[AI] Unsupported ext for AI eval: " + ext)
+        print("[AI] Unsupported ext: " + ext)
         return None
 
     student = db.query(admin_model.Admin).filter(
         admin_model.Admin.id == submission.student_id
     ).first()
     student_name = str(student.name) if student else "Student"
-    instruction = _build_prompt(assignment, student_name)
-
-    client = _get_client()
+    instruction  = _build_prompt(assignment, student_name)
+    client       = _get_client()
 
     try:
         if ext in PDF_EXTENSIONS or ext in IMAGE_EXTENSIONS:
-            mime = _EXT_MIME.get(ext, "application/octet-stream")
+            mime     = _EXT_MIME.get(ext, "application/octet-stream")
             uploaded = client.files.upload(
                 file=str(disk_path),
                 config=genai_types.UploadFileConfig(mime_type=mime),
@@ -194,10 +278,10 @@ def _run_ai_eval(assignment, submission, db) -> dict | None:
                 ),
             ]
         else:
-            content = disk_path.read_text(encoding="utf-8", errors="replace")
-            if len(content) > 150_000:
-                content = content[:150_000] + "\n[...truncated...]"
-            contents = [instruction + "\n\nSTUDENT SUBMISSION:\n```\n" + content + "\n```"]
+            text = disk_path.read_text(encoding="utf-8", errors="replace")
+            if len(text) > 150_000:
+                text = text[:150_000] + "\n[...truncated...]"
+            contents = [instruction + "\n\nSTUDENT SUBMISSION:\n```\n" + text + "\n```"]
 
     except Exception as e:
         print("[AI] Prompt preparation failed: " + str(e))
@@ -208,13 +292,24 @@ def _run_ai_eval(assignment, submission, db) -> dict | None:
 
 def _persist_ai_result(sub, ai_result: dict, db: Session) -> None:
     setattr(sub, "ai_suggested_marks", ai_result.get("suggested_marks"))
-    setattr(sub, "ai_feedback", ai_result.get("feedback"))
+    setattr(sub, "ai_feedback",        ai_result.get("feedback"))
+    breakdown = ai_result.get("breakdown", [])
+    setattr(sub, "ai_breakdown", json.dumps(breakdown) if breakdown else None)
     try:
         db.commit()
         db.refresh(sub)
     except Exception as e:
         db.rollback()
         print("[AI] Persist failed: " + str(e))
+
+
+# ===================================================================
+# Misc helpers
+# ===================================================================
+
+def _resolve_disk_path(file_path_str: str) -> Path:
+    fp = str(file_path_str)
+    return Path("." + fp) if fp.startswith("/") else Path(fp)
 
 
 def _normalize_extensions(exts: list[str] | None) -> list[str] | None:
@@ -263,11 +358,14 @@ def _save_upload(
     if len(data) == 0:
         raise HTTPException(status_code=400, detail="Empty file.")
 
-    folder = UPLOAD_ROOT / str(assignment_id)
+    folder    = UPLOAD_ROOT / str(assignment_id)
     folder.mkdir(parents=True, exist_ok=True)
     disk_name = str(student_id) + "_" + uuid.uuid4().hex + ext
     (folder / disk_name).write_bytes(data)
-    return "/uploads/submissions/" + str(assignment_id) + "/" + disk_name, file.filename or disk_name
+    return (
+        "/uploads/submissions/" + str(assignment_id) + "/" + disk_name,
+        file.filename or disk_name,
+    )
 
 
 def _delete_file(file_path: str) -> None:
@@ -279,6 +377,24 @@ def _delete_file(file_path: str) -> None:
             pass
 
 
+def _serialize_submission(s, name: str) -> dict:
+    """Convert a Submission ORM row to a dict, parsing ai_breakdown JSON."""
+    breakdown: list = []
+    if s.ai_breakdown:
+        try:
+            breakdown = json.loads(str(s.ai_breakdown))
+        except Exception:
+            breakdown = []
+    return {
+        "id": s.id, "assignment_id": s.assignment_id, "student_id": s.student_id,
+        "student_name": str(name), "file_name": s.file_name, "file_path": s.file_path,
+        "submitted_at": s.submitted_at, "ai_suggested_marks": s.ai_suggested_marks,
+        "ai_feedback": s.ai_feedback, "ai_breakdown": breakdown,
+        "marks_awarded": s.marks_awarded, "feedback": s.feedback,
+        "graded_at": s.graded_at, "grade_status": s.grade_status,
+    }
+
+
 # ===================================================================
 # PROFESSOR endpoints
 # ===================================================================
@@ -288,16 +404,24 @@ def create_assignment(db: Session, payload: AssignmentCreate, professor_id: int)
         raise HTTPException(status_code=400, detail="Due date must be in the future.")
 
     normalized = _normalize_extensions(payload.allowed_extensions)
-    stored = ",".join(normalized) if normalized else None
+    stored_ext = ",".join(normalized) if normalized else None
+
+    # Serialize rubric as JSON
+    stored_rubric = None
+    if payload.rubric:
+        stored_rubric = json.dumps([r.model_dump() for r in payload.rubric])
 
     new_a = assignment_model.Assignment(
-        professor_id=professor_id,
-        title=payload.title,
-        description=payload.description,
-        subject=payload.subject,
-        due_date=payload.due_date,
-        max_marks=payload.max_marks,
-        allowed_extensions=stored,
+        professor_id         = professor_id,
+        title                = payload.title,
+        description          = payload.description,
+        subject              = payload.subject,
+        due_date             = payload.due_date,
+        max_marks            = payload.max_marks,
+        allowed_extensions   = stored_ext,
+        grading_mode         = payload.grading_mode,
+        grading_instructions = payload.grading_instructions,
+        rubric               = stored_rubric,
     )
     try:
         db.add(new_a)
@@ -330,16 +454,25 @@ def list_my_assignments(db: Session, professor_id: int):
     ).first()
     prof_name = professor.name if professor else None
 
-    return [
-        {
+    result = []
+    for a, count in rows:
+        rubric_parsed = []
+        if a.rubric:
+            try:
+                rubric_parsed = json.loads(str(a.rubric))
+            except Exception:
+                rubric_parsed = []
+        result.append({
             "id": a.id, "title": a.title, "description": a.description,
             "subject": a.subject, "due_date": a.due_date, "max_marks": a.max_marks,
             "created_at": a.created_at, "submission_count": int(count),
             "professor_name": prof_name,
-            "allowed_extensions": _parse_extensions(a.allowed_extensions),
-        }
-        for a, count in rows
-    ]
+            "allowed_extensions":   _parse_extensions(a.allowed_extensions),
+            "grading_mode":         a.grading_mode,
+            "grading_instructions": a.grading_instructions,
+            "rubric":               rubric_parsed,
+        })
+    return result
 
 
 def delete_assignment(db: Session, assignment_id: int, professor_id: int):
@@ -354,14 +487,10 @@ def delete_assignment(db: Session, assignment_id: int, professor_id: int):
     folder = UPLOAD_ROOT / str(assignment_id)
     if folder.exists():
         for f in folder.iterdir():
-            try:
-                f.unlink()
-            except OSError:
-                pass
-        try:
-            folder.rmdir()
-        except OSError:
-            pass
+            try: f.unlink()
+            except OSError: pass
+        try: folder.rmdir()
+        except OSError: pass
 
     try:
         db.delete(a)
@@ -369,7 +498,6 @@ def delete_assignment(db: Session, assignment_id: int, professor_id: int):
         return {"message": "Assignment " + str(assignment_id) + " deleted"}
     except Exception as e:
         db.rollback()
-        print("Error: " + str(e))
         raise HTTPException(status_code=500, detail="Failed to delete assignment")
 
 
@@ -389,16 +517,7 @@ def list_submissions(db: Session, assignment_id: int, professor_id: int):
         .order_by(assignment_model.Submission.submitted_at.desc())
         .all()
     )
-    return [
-        {
-            "id": s.id, "assignment_id": s.assignment_id, "student_id": s.student_id,
-            "student_name": str(name), "file_name": s.file_name, "file_path": s.file_path,
-            "submitted_at": s.submitted_at, "ai_suggested_marks": s.ai_suggested_marks,
-            "ai_feedback": s.ai_feedback, "marks_awarded": s.marks_awarded,
-            "feedback": s.feedback, "graded_at": s.graded_at, "grade_status": s.grade_status,
-        }
-        for s, name in rows
-    ]
+    return [_serialize_submission(s, name) for s, name in rows]
 
 
 def grade_submission(
@@ -423,33 +542,25 @@ def grade_submission(
         )
 
     setattr(sub, "marks_awarded", payload.marks_awarded)
-    setattr(sub, "feedback", payload.feedback)
-    setattr(sub, "graded_at", datetime.utcnow())
-    setattr(sub, "grade_status", "approved")
+    setattr(sub, "feedback",      payload.feedback)
+    setattr(sub, "graded_at",     datetime.utcnow())
+    setattr(sub, "grade_status",  "approved")
 
     try:
         db.commit()
         db.refresh(sub)
     except Exception as e:
         db.rollback()
-        print("Error: " + str(e))
         raise HTTPException(status_code=500, detail="Failed to save grade")
 
     student = db.query(admin_model.Admin).filter(
         admin_model.Admin.id == sub.student_id
     ).first()
-    return {
-        "id": sub.id, "assignment_id": sub.assignment_id, "student_id": sub.student_id,
-        "student_name": str(student.name) if student else "",
-        "file_name": sub.file_name, "file_path": sub.file_path,
-        "submitted_at": sub.submitted_at, "ai_suggested_marks": sub.ai_suggested_marks,
-        "ai_feedback": sub.ai_feedback, "marks_awarded": sub.marks_awarded,
-        "feedback": sub.feedback, "graded_at": sub.graded_at, "grade_status": sub.grade_status,
-    }
+    return _serialize_submission(sub, student.name if student else "")
 
 
 # ===================================================================
-# PUBLIC: Manual AI Evaluation (professor button)
+# PUBLIC: Manual AI Evaluation
 # ===================================================================
 
 def run_ai_for_submission(db: Session, submission_id: int, professor_id: int) -> dict:
@@ -475,12 +586,11 @@ def run_ai_for_submission(db: Session, submission_id: int, professor_id: int) ->
             status_code=422,
             detail=(
                 "File type '" + ext + "' is not supported for AI evaluation. "
-                "Supported: PDF, images (.png/.jpg/.jpeg), and text/code files."
+                "Supported: PDF, images, and text/code files."
             ),
         )
 
     ai_result = _run_ai_eval(a, sub, db)
-
     if ai_result is None:
         raise HTTPException(
             status_code=502,
@@ -495,14 +605,7 @@ def run_ai_for_submission(db: Session, submission_id: int, professor_id: int) ->
     student = db.query(admin_model.Admin).filter(
         admin_model.Admin.id == sub.student_id
     ).first()
-    return {
-        "id": sub.id, "assignment_id": sub.assignment_id, "student_id": sub.student_id,
-        "student_name": str(student.name) if student else "",
-        "file_name": sub.file_name, "file_path": sub.file_path,
-        "submitted_at": sub.submitted_at, "ai_suggested_marks": sub.ai_suggested_marks,
-        "ai_feedback": sub.ai_feedback, "marks_awarded": sub.marks_awarded,
-        "feedback": sub.feedback, "graded_at": sub.graded_at, "grade_status": sub.grade_status,
-    }
+    return _serialize_submission(sub, student.name if student else "")
 
 
 # ===================================================================
@@ -543,26 +646,19 @@ def list_assignments_for_student(db: Session, student_id: int):
             "subject": a.subject, "due_date": a.due_date, "max_marks": a.max_marks,
             "professor_name": str(prof_name) if prof_name else None,
             "allowed_extensions": _parse_extensions(a.allowed_extensions),
-            "submission_id": sub.id if sub else None,
-            "submitted_at": sub.submitted_at if sub else None,
+            "submission_id":        sub.id if sub else None,
+            "submitted_at":         sub.submitted_at if sub else None,
             "submission_file_name": sub.file_name if sub else None,
-            "grade_status": sub.grade_status if sub else None,
-            "marks_awarded": (
-                sub.marks_awarded if sub and sub.grade_status == "approved" else None
-            ),
-            "feedback": (
-                sub.feedback if sub and sub.grade_status == "approved" else None
-            ),
+            "grade_status":         sub.grade_status if sub else None,
+            "marks_awarded": (sub.marks_awarded if sub and sub.grade_status == "approved" else None),
+            "feedback":      (sub.feedback      if sub and sub.grade_status == "approved" else None),
         }
         for a, prof_name, sub in rows
     ]
 
 
 def submit_assignment(
-    db: Session,
-    assignment_id: int,
-    file: UploadFile,
-    student_id: int,
+    db: Session, assignment_id: int, file: UploadFile, student_id: int
 ):
     a = db.query(assignment_model.Assignment).filter(
         assignment_model.Assignment.id == assignment_id
@@ -581,7 +677,7 @@ def submit_assignment(
 
     existing = db.query(assignment_model.Submission).filter(
         assignment_model.Submission.assignment_id == assignment_id,
-        assignment_model.Submission.student_id == student_id,
+        assignment_model.Submission.student_id    == student_id,
     ).first()
 
     try:
@@ -590,9 +686,8 @@ def submit_assignment(
             for attr, val in [
                 ("file_path", file_path), ("file_name", file_name),
                 ("submitted_at", datetime.utcnow()), ("marks_awarded", None),
-                ("feedback", None), ("graded_at", None),
-                ("ai_suggested_marks", None), ("ai_feedback", None),
-                ("grade_status", "pending"),
+                ("feedback", None), ("graded_at", None), ("ai_suggested_marks", None),
+                ("ai_feedback", None), ("ai_breakdown", None), ("grade_status", "pending"),
             ]:
                 setattr(existing, attr, val)
             db.commit()
@@ -600,21 +695,17 @@ def submit_assignment(
             sub = existing
         else:
             sub = assignment_model.Submission(
-                assignment_id=assignment_id,
-                student_id=student_id,
-                file_path=file_path,
-                file_name=file_name,
-                grade_status="pending",
+                assignment_id=assignment_id, student_id=student_id,
+                file_path=file_path, file_name=file_name, grade_status="pending",
             )
             db.add(sub)
             db.commit()
             db.refresh(sub)
     except Exception as e:
         db.rollback()
-        print("Error: " + str(e))
         raise HTTPException(status_code=500, detail="Failed to save submission")
 
-    # Auto AI eval on upload — non-fatal if quota exceeded
+    # Auto AI eval — non-fatal
     try:
         ai_result = _run_ai_eval(a, sub, db)
         if ai_result:
@@ -625,14 +716,7 @@ def submit_assignment(
     student = db.query(admin_model.Admin).filter(
         admin_model.Admin.id == student_id
     ).first()
-    return {
-        "id": sub.id, "assignment_id": sub.assignment_id, "student_id": sub.student_id,
-        "student_name": str(student.name) if student else "",
-        "file_name": sub.file_name, "file_path": sub.file_path,
-        "submitted_at": sub.submitted_at, "ai_suggested_marks": sub.ai_suggested_marks,
-        "ai_feedback": sub.ai_feedback, "marks_awarded": sub.marks_awarded,
-        "feedback": sub.feedback, "graded_at": sub.graded_at, "grade_status": sub.grade_status,
-    }
+    return _serialize_submission(sub, student.name if student else "")
 
 
 # ===================================================================
@@ -650,9 +734,7 @@ def get_submission_for_download(db: Session, submission_id: int, user_id: int):
         assignment_model.Assignment.id == sub.assignment_id
     ).first()
 
-    is_student = int(sub.student_id) == user_id
-    is_prof = a is not None and int(a.professor_id) == user_id
-    if not (is_student or is_prof):
+    if not (int(sub.student_id) == user_id or (a and int(a.professor_id) == user_id)):
         raise HTTPException(status_code=403, detail="Forbidden.")
 
     disk_path = _resolve_disk_path(str(sub.file_path))

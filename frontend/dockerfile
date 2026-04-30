@@ -1,0 +1,18 @@
+FROM node:20-slim
+
+WORKDIR /app
+
+# Copy package files first (better caching)
+COPY package.json package-lock.json ./
+
+# Install dependencies
+RUN npm install
+
+# Copy the rest of the app
+COPY . .
+
+# Expose Vite dev port
+EXPOSE 5173
+
+# Start dev server (accessible outside container)
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

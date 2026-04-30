@@ -1,23 +1,82 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import * as pdfjsLib from 'pdfjs-dist'
 import api from '../api.js'
 import Header from '../components/Header.jsx'
 
+// ── PDF.js worker ─────────────────────────────────────────────────────────────
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url
+).toString()
+
+// ── Constants ─────────────────────────────────────────────────────────────────
 const SUBJECTS = [
   'Mathematics', 'Physics', 'Chemistry', 'English', 'Computer Science',
-  'Data Structures', 'Operating Systems', 'DBMS', 'Computer Networks', 'Artificial Intelligence',
+  'Data Structures', 'Operating Systems', 'DBMS', 'Computer Networks',
+  'Artificial Intelligence',
 ]
 
-const FILE_TYPE_GROUPS = [
-  { label: 'Documents', exts: ['.pdf', '.doc', '.docx', '.md', '.txt'] },
-  { label: 'Images',    exts: ['.png', '.jpg', '.jpeg'] },
-  { label: 'Code',      exts: ['.py', '.js', '.java', '.cpp', '.c', '.ipynb'] },
-]
-
-// File types Gemini can actually evaluate
 const AI_SUPPORTED_EXTS = new Set([
   '.pdf', '.txt', '.md', '.py', '.js', '.java', '.cpp', '.c', '.ipynb',
   '.png', '.jpg', '.jpeg',
 ])
+
+const CODE_EXTS  = /\.(py|js|java|cpp|c|txt|md|ipynb)$/i
+const IMAGE_EXTS = /\.(png|jpg|jpeg)$/i
+const PDF_EXT    = /\.pdf$/i
+
+const MIME_MAP = {
+  '.pdf':  'application/pdf',
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.py':   'text/plain',
+  '.js':   'text/plain',
+  '.java': 'text/plain',
+  '.cpp':  'text/plain',
+  '.c':    'text/plain',
+  '.txt':  'text/plain',
+  '.md':   'text/plain',
+  '.ipynb':'text/plain',
+}
+
+const FILE_TYPE_EXTS = [
+  '.pdf', '.doc', '.docx', '.md', '.txt',
+  '.png', '.jpg', '.jpeg',
+  '.py', '.js', '.java', '.cpp', '.c', '.ipynb',
+]
+
+const GRADING_MODES = [
+  {
+    value: 'strict',
+    label: 'Strict',
+    desc: 'Penalize every mistake heavily',
+    active: 'text-red-700 bg-red-50 border-red-300',
+    badge:  'bg-red-50 text-red-700 border-red-200',
+  },
+  {
+    value: 'balanced',
+    label: 'Balanced',
+    desc: 'Fair — reward correct logic',
+    active: 'text-blue-700 bg-blue-50 border-blue-300',
+    badge:  'bg-blue-50 text-blue-700 border-blue-200',
+  },
+  {
+    value: 'lenient',
+    label: 'Lenient',
+    desc: 'Reward effort generously',
+    active: 'text-green-700 bg-green-50 border-green-300',
+    badge:  'bg-green-50 text-green-700 border-green-200',
+  },
+]
+
+const EMPTY_FORM = {
+  title: '', description: '', subject: '', due_date: '', max_marks: 100,
+  allowed_extensions: ['.pdf'],
+  grading_mode: 'balanced',
+  grading_instructions: '',
+  rubric: [],
+}
 
 function canAiEval(filename) {
   if (!filename) return false
@@ -25,93 +84,256 @@ function canAiEval(filename) {
   return AI_SUPPORTED_EXTS.has(ext)
 }
 
+function getModeInfo(value) {
+  return GRADING_MODES.find(m => m.value === value) || GRADING_MODES[1]
+}
+
+// ── PDF Canvas Viewer ─────────────────────────────────────────────────────────
+// Renders every page of a PDF to <canvas> — never triggers a download
+function PDFViewer({ url }) {
+  const containerRef = useRef(null)
+  const [status, setStatus] = useState('loading') // loading | done | error
+  const [pageCount, setPageCount] = useState(0)
+
+  useEffect(() => {
+    if (!url) return
+    let cancelled = false
+    setStatus('loading')
+    setPageCount(0)
+
+    ;(async () => {
+      try {
+        const loadingTask = pdfjsLib.getDocument(url)
+        const pdf = await loadingTask.promise
+        if (cancelled) return
+
+        setPageCount(pdf.numPages)
+        const container = containerRef.current
+        if (!container) return
+        container.innerHTML = ''
+
+        for (let i = 1; i <= pdf.numPages; i++) {
+          if (cancelled) return
+          const page = await pdf.getPage(i)
+          const viewport = page.getViewport({ scale: 1.5 })
+
+          const wrapper = document.createElement('div')
+          wrapper.style.cssText = 'margin-bottom:8px;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.15);'
+
+          const canvas = document.createElement('canvas')
+          canvas.width  = viewport.width
+          canvas.height = viewport.height
+          canvas.style.cssText = 'display:block;width:100%;height:auto;'
+
+          wrapper.appendChild(canvas)
+          container.appendChild(wrapper)
+
+          await page.render({
+            canvasContext: canvas.getContext('2d'),
+            viewport,
+          }).promise
+        }
+
+        if (!cancelled) setStatus('done')
+      } catch (err) {
+        if (!cancelled) { console.error('PDF render error:', err); setStatus('error') }
+      }
+    })()
+
+    return () => { cancelled = true }
+  }, [url])
+
+  return (
+    <div className="w-full h-full overflow-auto bg-stone-200 p-4">
+      {status === 'loading' && (
+        <div className="flex flex-col items-center justify-center h-40 gap-2">
+          <svg className="animate-spin w-6 h-6 text-stone-400" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+          </svg>
+          <span className="text-stone-400 text-sm">Rendering PDF...</span>
+        </div>
+      )}
+      {status === 'error' && (
+        <div className="flex flex-col items-center justify-center h-40 gap-3 text-red-500">
+          <span className="text-sm">Failed to render PDF.</span>
+          <span className="text-xs text-stone-400">The file may be corrupted or password-protected.</span>
+        </div>
+      )}
+      <div ref={containerRef} />
+      {status === 'done' && pageCount > 0 && (
+        <div className="text-center text-xs text-stone-400 mt-2 pb-2">
+          {pageCount} page{pageCount !== 1 ? 's' : ''}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Code Viewer ───────────────────────────────────────────────────────────────
+function CodeViewer({ url, filename }) {
+  const [code, setCode]       = useState('')
+  const [loading, setLoading] = useState(true)
+  const [errored, setErrored] = useState(false)
+
+  useEffect(() => {
+    if (!url) return
+    setLoading(true); setErrored(false)
+    fetch(url)
+      .then(r => { if (!r.ok) throw new Error(); return r.text() })
+      .then(t => { setCode(t); setLoading(false) })
+      .catch(() => { setErrored(true); setLoading(false) })
+  }, [url])
+
+  return (
+    <div className="w-full h-full flex flex-col overflow-hidden bg-stone-900">
+      <div className="px-4 py-2 bg-stone-800 text-stone-300 text-xs font-mono border-b border-stone-700 shrink-0 flex items-center gap-2">
+        <span className="w-2 h-2 rounded-full bg-green-400 inline-block" />
+        {filename}
+      </div>
+      <div className="flex-1 overflow-auto p-4">
+        {loading && <div className="text-stone-500 text-sm animate-pulse font-mono">Loading...</div>}
+        {errored && <div className="text-red-400 text-sm font-mono">Could not load file. Try downloading.</div>}
+        {!loading && !errored && (
+          <pre className="text-sm font-mono text-stone-100 whitespace-pre-wrap leading-relaxed">
+            {code || '(empty file)'}
+          </pre>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Breakdown Table ───────────────────────────────────────────────────────────
+function BreakdownTable({ breakdown, suggestedMarks, maxMarks, feedback }) {
+  if (!breakdown?.length) return null
+  return (
+    <div className="rounded-lg overflow-hidden border border-blue-100 text-xs">
+      <table className="w-full">
+        <thead>
+          <tr className="bg-blue-100 text-blue-700 text-left">
+            <th className="px-3 py-2">Criteria</th>
+            <th className="px-3 py-2 text-center w-16">Marks</th>
+          </tr>
+        </thead>
+        <tbody className="bg-white divide-y divide-blue-50">
+          {breakdown.map((item, i) => (
+            <tr key={i}>
+              <td className="px-3 py-2">
+                <div className="font-medium text-stone-700">{item.criteria}</div>
+                {item.reason && (
+                  <div className="text-[10px] text-stone-400 mt-0.5 leading-relaxed">{item.reason}</div>
+                )}
+              </td>
+              <td className="px-3 py-2 text-center font-mono font-bold text-blue-800">
+                {item.marks}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot>
+          <tr className="bg-blue-50 border-t-2 border-blue-200">
+            <td className="px-3 py-2 font-bold text-stone-700">
+              Total
+              {feedback && (
+                <div className="font-normal text-[10px] text-stone-500 mt-0.5 italic leading-relaxed">
+                  {feedback}
+                </div>
+              )}
+            </td>
+            <td className="px-3 py-2 text-center font-mono font-bold text-blue-900 text-sm">
+              {suggestedMarks}
+              <span className="text-blue-400 text-xs font-normal">/{maxMarks}</span>
+            </td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  )
+}
+
+// ── Spinner ───────────────────────────────────────────────────────────────────
+function Spinner() {
+  return (
+    <svg className="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+    </svg>
+  )
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
 export default function ProfessorDashboard() {
   const [tab, setTab] = useState('marks')
 
-  // ---- Marks & Students State ----
-  const [students, setStudents] = useState([])
-  const [analytics, setAnalytics] = useState(null)
-  const [marks, setMarks] = useState([])
-  const [selected, setSelected] = useState(null)
+  // Marks
+  const [students, setStudents]           = useState([])
+  const [analytics, setAnalytics]         = useState(null)
+  const [marks, setMarks]                 = useState([])
+  const [selected, setSelected]           = useState(null)
   const [editingMarkId, setEditingMarkId] = useState(null)
-  const [editValue, setEditValue] = useState('')
-  const [studentForm, setStudentForm] = useState({ name: '', email: '', password: '' })
-  const [markForm, setMarkForm] = useState({ subject: '', marks_obtained: '' })
+  const [editValue, setEditValue]         = useState('')
+  const [studentForm, setStudentForm]     = useState({ name: '', email: '', password: '' })
+  const [markForm, setMarkForm]           = useState({ subject: '', marks_obtained: '' })
 
-  // ---- Assignment State ----
-  const [assignments, setAssignments] = useState([])
-  const [assignmentForm, setAssignmentForm] = useState({
-    title: '', description: '', subject: '', due_date: '', max_marks: 100,
-    allowed_extensions: ['.pdf'],
-  })
+  // Assignments
+  const [assignments, setAssignments]                   = useState([])
+  const [assignmentForm, setAssignmentForm]             = useState(EMPTY_FORM)
+  const [newRubricRow, setNewRubricRow]                 = useState({ criteria: '', max_marks: '' })
   const [expandedAssignmentId, setExpandedAssignmentId] = useState(null)
-  const [submissions, setSubmissions] = useState([])
-  const [gradingId, setGradingId] = useState(null)
-  const [gradeForm, setGradeForm] = useState({ marks_awarded: '', feedback: '' })
+  const [submissions, setSubmissions]                   = useState([])
+  const [gradingId, setGradingId]                       = useState(null)
+  const [gradeForm, setGradeForm]                       = useState({ marks_awarded: '', feedback: '' })
 
-  // ---- AI Evaluation State ----
-  // Map of submissionId -> 'loading' | 'done' | 'error'
+  // AI
   const [aiStatus, setAiStatus] = useState({})
 
-  // ---- Preview State ----
-  const [previewUrl, setPreviewUrl] = useState(null)
-  const [previewName, setPreviewName] = useState('')
+  // Preview
+  const [previewBlob, setPreviewBlob]             = useState(null)   // raw Blob, used only for download
+  const [previewUrl, setPreviewUrl]               = useState(null)   // object URL for viewers
+  const [previewName, setPreviewName]             = useState('')
+  const [previewSubmission, setPreviewSubmission] = useState(null)
+  const [previewAssignment, setPreviewAssignment] = useState(null)
+  const [previewGrading, setPreviewGrading]       = useState(false)
+  const [previewLoading, setPreviewLoading]       = useState(false)
 
-  const [error, setError] = useState('')
+  const [error, setError]     = useState('')
   const [success, setSuccess] = useState('')
 
-  // ---------- Loaders ----------
+  // ── Loaders ──────────────────────────────────────────────────────────────
   async function loadStudents() {
-    try {
-      const { data } = await api.get('/professor/students')
-      setStudents(data)
-    } catch { setError('Failed to load students') }
+    try { const { data } = await api.get('/professor/students'); setStudents(data) }
+    catch { flash(setError, 'Failed to load students') }
   }
-
   async function loadAnalytics() {
-    try {
-      const { data } = await api.get('/professor/analytics')
-      setAnalytics(data)
-    } catch {}
+    try { const { data } = await api.get('/professor/analytics'); setAnalytics(data) }
+    catch {}
   }
-
-  async function loadMarks(studentId) {
-    try {
-      const { data } = await api.get(`/professor/marks/student/${studentId}`)
-      setMarks(data)
-    } catch (err) { setError(err.response?.data?.detail || 'Failed to load marks') }
+  async function loadMarks(sid) {
+    try { const { data } = await api.get('/professor/marks/student/' + sid); setMarks(data) }
+    catch (err) { flash(setError, err.response?.data?.detail || 'Failed to load marks') }
   }
-
   async function loadAssignments() {
-    try {
-      const { data } = await api.get('/professor/assignments')
-      setAssignments(data)
-    } catch { setError('Failed to load assignments') }
+    try { const { data } = await api.get('/professor/assignments'); setAssignments(data) }
+    catch { flash(setError, 'Failed to load assignments') }
   }
-
-  async function loadSubmissions(assignmentId) {
+  async function loadSubmissions(aid) {
     try {
-      const { data } = await api.get(`/professor/assignments/${assignmentId}/submissions`)
+      const { data } = await api.get('/professor/assignments/' + aid + '/submissions')
       setSubmissions(data)
-    } catch { setError('Failed to load submissions') }
+    } catch { flash(setError, 'Failed to load submissions') }
   }
 
-  useEffect(() => {
-    loadStudents()
-    loadAnalytics()
-    loadAssignments()
-  }, [])
+  useEffect(() => { loadStudents(); loadAnalytics(); loadAssignments() }, [])
 
-  function flash(setter, msg) {
-    setter(msg); setTimeout(() => setter(''), 3500)
-  }
+  function flash(setter, msg) { setter(msg); setTimeout(() => setter(''), 3500) }
 
-  // ---------- Logic: Marks ----------
+  // ── Marks ─────────────────────────────────────────────────────────────────
   async function addStudent(e) {
     e.preventDefault()
     try {
       await api.post('/professor/students', studentForm)
-      flash(setSuccess, `Added ${studentForm.name}`)
+      flash(setSuccess, 'Added ' + studentForm.name)
       setStudentForm({ name: '', email: '', password: '' })
       loadStudents()
     } catch { flash(setError, 'Failed to add student') }
@@ -135,7 +357,7 @@ export default function ProfessorDashboard() {
 
   async function saveMarkEdit(markId) {
     try {
-      await api.put(`/professor/marks/${markId}`, { marks_obtained: parseInt(editValue, 10) })
+      await api.put('/professor/marks/' + markId, { marks_obtained: parseInt(editValue, 10) })
       flash(setSuccess, 'Mark updated')
       setEditingMarkId(null)
       loadMarks(selected.id)
@@ -143,59 +365,78 @@ export default function ProfessorDashboard() {
     } catch { flash(setError, 'Failed to update mark') }
   }
 
-  // ---------- Logic: AI Evaluation ----------
-  async function runAiEval(submissionId) {
-    setAiStatus(prev => ({ ...prev, [submissionId]: 'loading' }))
-    setError('')
-    try {
-      const { data } = await api.post(`/professor/submissions/${submissionId}/ai-evaluate`)
-      // Update the local submissions list with fresh AI data
-      setSubmissions(prev =>
-        prev.map(s => s.id === submissionId
-          ? { ...s, ai_suggested_marks: data.ai_suggested_marks, ai_feedback: data.ai_feedback }
-          : s
-        )
-      )
-      setAiStatus(prev => ({ ...prev, [submissionId]: 'done' }))
-      flash(setSuccess, 'AI evaluation complete')
-    } catch (err) {
-      const msg = err.response?.data?.detail || 'AI evaluation failed'
-      setAiStatus(prev => ({ ...prev, [submissionId]: 'error' }))
-      flash(setError, msg)
-    }
+  // ── Rubric helpers ────────────────────────────────────────────────────────
+  function addRubricRow() {
+    if (!newRubricRow.criteria.trim() || !newRubricRow.max_marks) return
+    setAssignmentForm(f => ({
+      ...f,
+      rubric: [...f.rubric, {
+        criteria: newRubricRow.criteria.trim(),
+        max_marks: parseInt(newRubricRow.max_marks, 10),
+      }],
+    }))
+    setNewRubricRow({ criteria: '', max_marks: '' })
   }
 
-  // ---------- Logic: Preview & Grade ----------
-  async function handlePreview(submissionId, filename) {
+  function removeRubricRow(i) {
+    setAssignmentForm(f => ({ ...f, rubric: f.rubric.filter((_, idx) => idx !== i) }))
+  }
+
+  function rubricTotal() {
+    return assignmentForm.rubric.reduce((s, r) => s + (parseInt(r.max_marks, 10) || 0), 0)
+  }
+
+  function toggleExt(ext) {
+    setAssignmentForm(f => ({
+      ...f,
+      allowed_extensions: f.allowed_extensions.includes(ext)
+        ? f.allowed_extensions.filter(e => e !== ext)
+        : [...f.allowed_extensions, ext],
+    }))
+  }
+
+  // ── Assignments ───────────────────────────────────────────────────────────
+  async function postAssignment(e) {
+    e.preventDefault()
+    if (assignmentForm.rubric.length > 0 && rubricTotal() !== parseInt(assignmentForm.max_marks, 10)) {
+      flash(setError, 'Rubric total (' + rubricTotal() + ') must equal Max Marks (' + assignmentForm.max_marks + ')')
+      return
+    }
     try {
-      setError('')
-      setPreviewUrl(null)
-      const res = await api.get(`/submissions/${submissionId}/download`, {
-        params: { preview: true },
-        responseType: 'blob',
+      const { data } = await api.post('/professor/assignments', {
+        ...assignmentForm,
+        max_marks: parseInt(assignmentForm.max_marks, 10),
       })
-      const blob = new Blob([res.data], { type: res.headers['content-type'] || 'application/pdf' })
-      const url = window.URL.createObjectURL(blob)
-      setPreviewUrl(url)
-      setPreviewName(filename)
+      setAssignments([data, ...assignments])
+      setAssignmentForm(EMPTY_FORM)
+      setNewRubricRow({ criteria: '', max_marks: '' })
+      flash(setSuccess, 'Assignment posted!')
     } catch (err) {
-      console.error('Preview Error:', err)
-      flash(setError, 'Server error while generating preview.')
+      flash(setError, err.response?.data?.detail || 'Failed to post assignment')
     }
   }
 
   async function deleteAssignment(id) {
-    if (!window.confirm('Delete this assignment and all its submissions?')) return
+    if (!window.confirm('Delete this assignment and all submissions?')) return
     try {
-      await api.delete(`/professor/assignments/${id}`)
+      await api.delete('/professor/assignments/' + id)
       setAssignments(assignments.filter(a => a.id !== id))
       flash(setSuccess, 'Deleted')
     } catch { flash(setError, 'Delete failed') }
   }
 
+  // ── Grade ─────────────────────────────────────────────────────────────────
+  function startGrading(sub) {
+    setGradingId(sub.id)
+    setGradeForm({
+      marks_awarded: String(sub.marks_awarded ?? sub.ai_suggested_marks ?? ''),
+      feedback: sub.feedback ?? sub.ai_feedback ?? '',
+    })
+  }
+
   async function saveGrade(submissionId) {
     try {
-      await api.put(`/professor/submissions/${submissionId}/grade`, {
+      await api.put('/professor/submissions/' + submissionId + '/grade', {
         marks_awarded: parseInt(gradeForm.marks_awarded, 10),
         feedback: gradeForm.feedback,
       })
@@ -205,21 +446,100 @@ export default function ProfessorDashboard() {
     } catch (err) { flash(setError, err.response?.data?.detail || 'Failed to save grade') }
   }
 
-  function startGrading(sub) {
-    setGradingId(sub.id)
-    setGradeForm({
-      marks_awarded: String(sub.marks_awarded ?? sub.ai_suggested_marks ?? ''),
-      feedback: sub.feedback ?? sub.ai_feedback ?? '',
-    })
+  async function saveGradeFromPreview(subId) {
+    try {
+      await api.put('/professor/submissions/' + subId + '/grade', {
+        marks_awarded: parseInt(gradeForm.marks_awarded, 10),
+        feedback: gradeForm.feedback,
+      })
+      flash(setSuccess, 'Approved & released to student')
+      setPreviewSubmission(prev => ({
+        ...prev,
+        marks_awarded: parseInt(gradeForm.marks_awarded, 10),
+        feedback: gradeForm.feedback,
+        grade_status: 'approved',
+      }))
+      setPreviewGrading(false)
+      loadSubmissions(expandedAssignmentId)
+    } catch (err) { flash(setError, err.response?.data?.detail || 'Failed to save grade') }
   }
 
-  function toggleExt(ext) {
-    setAssignmentForm((f) => ({
-      ...f,
-      allowed_extensions: f.allowed_extensions.includes(ext)
-        ? f.allowed_extensions.filter((e) => e !== ext)
-        : [...f.allowed_extensions, ext],
-    }))
+  // ── AI Eval ───────────────────────────────────────────────────────────────
+  async function runAiEval(subId) {
+    setAiStatus(prev => ({ ...prev, [subId]: 'loading' }))
+    try {
+      const { data } = await api.post('/professor/submissions/' + subId + '/ai-evaluate')
+      setSubmissions(prev => prev.map(s => s.id === subId ? { ...s, ...data } : s))
+      if (previewSubmission?.id === subId) {
+        setPreviewSubmission(prev => ({ ...prev, ...data }))
+        setGradeForm({
+          marks_awarded: String(data.ai_suggested_marks ?? ''),
+          feedback: data.ai_feedback ?? '',
+        })
+      }
+      setAiStatus(prev => ({ ...prev, [subId]: 'done' }))
+      flash(setSuccess, 'AI evaluation complete')
+    } catch (err) {
+      setAiStatus(prev => ({ ...prev, [subId]: 'error' }))
+      flash(setError, err.response?.data?.detail || 'AI evaluation failed')
+    }
+  }
+
+  // ── Preview ───────────────────────────────────────────────────────────────
+  async function handlePreview(sub, assignment) {
+    try {
+      setPreviewSubmission(sub)
+      setPreviewAssignment(assignment)
+      setPreviewGrading(!sub.marks_awarded)
+      setPreviewUrl(null)
+      setPreviewBlob(null)
+      setPreviewName('')
+      setPreviewLoading(true)
+      setGradeForm({
+        marks_awarded: String(sub.marks_awarded ?? sub.ai_suggested_marks ?? ''),
+        feedback: sub.feedback ?? sub.ai_feedback ?? '',
+      })
+
+      const res = await api.get('/submissions/' + sub.id + '/download', {
+        responseType: 'blob',
+      })
+
+      const filename = sub.file_name
+      const ext = filename.slice(filename.lastIndexOf('.')).toLowerCase()
+      const mime = MIME_MAP[ext] || 'application/octet-stream'
+      const blob = new Blob([res.data], { type: mime })
+      const url  = window.URL.createObjectURL(blob)
+
+      setPreviewBlob(blob)
+      setPreviewUrl(url)
+      setPreviewName(filename)
+      setPreviewLoading(false)
+    } catch (err) {
+      setPreviewLoading(false)
+      flash(setError, 'Failed to load preview: ' + (err.response?.data?.detail || err.message))
+    }
+  }
+
+  function closePreview() {
+    if (previewUrl) window.URL.revokeObjectURL(previewUrl)
+    setPreviewUrl(null)
+    setPreviewBlob(null)
+    setPreviewName('')
+    setPreviewSubmission(null)
+    setPreviewAssignment(null)
+    setPreviewGrading(false)
+    setPreviewLoading(false)
+  }
+
+  // Manual download — only happens when user explicitly clicks "Download"
+  function triggerDownload() {
+    if (!previewBlob || !previewName) return
+    const a = document.createElement('a')
+    a.href = window.URL.createObjectURL(previewBlob)
+    a.download = previewName
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
   }
 
   function fmtDate(d) {
@@ -227,32 +547,271 @@ export default function ProfessorDashboard() {
     return new Date(d).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
   }
 
+  // ── AI Button ─────────────────────────────────────────────────────────────
+  function AiButton({ subId, hasAi, supported }) {
+    const loading = aiStatus[subId] === 'loading'
+    if (!supported) return <span className="text-[10px] text-stone-400 italic">Not supported</span>
+    return (
+      <button
+        onClick={() => runAiEval(subId)}
+        disabled={loading}
+        className={`text-[11px] px-3 py-1.5 rounded border transition flex items-center gap-1.5 ${
+          loading
+            ? 'bg-blue-50 border-blue-200 text-blue-400 cursor-not-allowed'
+            : hasAi
+            ? 'bg-white border-stone-300 text-stone-600 hover:border-blue-400 hover:text-blue-600'
+            : 'bg-blue-600 border-blue-600 text-white hover:bg-blue-700'
+        }`}
+      >
+        {loading ? <><Spinner /> Evaluating...</> : hasAi ? '↻ Re-evaluate' : '✦ Run AI Eval'}
+      </button>
+    )
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   return (
     <>
       <Header title="Professor Console" subtitle="Management" />
 
-      {/* PREVIEW MODAL */}
-      {previewUrl && (
-        <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
-          <div className="bg-white w-full h-full max-w-6xl rounded-2xl overflow-hidden flex flex-col shadow-2xl">
-            <div className="p-4 border-b flex justify-between items-center bg-stone-50">
-              <span className="font-bold">Viewing: {previewName}</span>
-              <button
-                onClick={() => { window.URL.revokeObjectURL(previewUrl); setPreviewUrl(null) }}
-                className="px-6 py-2 bg-stone-900 text-white rounded-lg text-sm"
-              >Close</button>
+      {/* ══ PREVIEW MODAL ══ */}
+      {previewSubmission && (previewUrl || previewLoading) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="bg-white w-full h-full max-w-7xl rounded-2xl overflow-hidden flex flex-col shadow-2xl">
+
+            {/* Header */}
+            <div className="px-5 py-3 border-b bg-stone-50 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="font-semibold text-stone-800">{previewSubmission.student_name}</span>
+                <span className="text-stone-300">•</span>
+                <span className="text-xs text-stone-500 font-mono">{previewName}</span>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium border ${
+                  previewSubmission.grade_status === 'approved'
+                    ? 'bg-green-100 text-green-700 border-green-200'
+                    : 'bg-amber-100 text-amber-700 border-amber-200'
+                }`}>
+                  {previewSubmission.grade_status === 'approved' ? '✓ Approved' : 'Pending'}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                {/* Download is explicit — no href, uses triggerDownload() */}
+                {previewBlob && (
+                  <button
+                    onClick={triggerDownload}
+                    className="px-4 py-1.5 border border-stone-300 rounded-lg text-sm hover:bg-stone-100 transition"
+                  >
+                    Download
+                  </button>
+                )}
+                <button
+                  onClick={closePreview}
+                  className="px-4 py-1.5 bg-stone-900 text-white rounded-lg text-sm hover:bg-stone-700 transition"
+                >
+                  Close
+                </button>
+              </div>
             </div>
-            <div className="flex-1 overflow-hidden">
-              <embed src={previewUrl} type="application/pdf" width="100%" height="100%" />
+
+            {/* Body */}
+            <div className="flex flex-1 overflow-hidden">
+
+              {/* LEFT — file viewer */}
+              <div className="flex-1 overflow-hidden border-r border-stone-200">
+                {previewLoading ? (
+                  <div className="w-full h-full flex items-center justify-center bg-stone-100">
+                    <div className="text-stone-400 text-sm animate-pulse">Loading file...</div>
+                  </div>
+                ) : !previewUrl ? (
+                  <div className="w-full h-full flex items-center justify-center bg-stone-100">
+                    <div className="text-stone-400 text-sm">No file loaded.</div>
+                  </div>
+                ) : PDF_EXT.test(previewName) ? (
+                  // ✅ PDF rendered to canvas — no download triggered
+                  <PDFViewer url={previewUrl} />
+                ) : CODE_EXTS.test(previewName) ? (
+                  <CodeViewer url={previewUrl} filename={previewName} />
+                ) : IMAGE_EXTS.test(previewName) ? (
+                  <div className="w-full h-full flex items-center justify-center bg-stone-100 p-6">
+                    <img
+                      src={previewUrl}
+                      alt={previewName}
+                      className="max-w-full max-h-full object-contain rounded-lg shadow"
+                    />
+                  </div>
+                ) : (
+                  <div className="w-full h-full flex flex-col items-center justify-center bg-stone-50 gap-4">
+                    <svg className="w-12 h-12 text-stone-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                        d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                    </svg>
+                    <div className="text-stone-500 text-sm text-center">
+                      <div className="font-medium mb-1">{previewName}</div>
+                      <div className="text-xs text-stone-400">This file type cannot be previewed inline.</div>
+                    </div>
+                    <button
+                      onClick={triggerDownload}
+                      className="px-5 py-2.5 bg-stone-900 text-white rounded-lg text-sm hover:bg-stone-700 transition"
+                    >
+                      Download to view
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* RIGHT — AI + grade */}
+              <div className="w-96 flex flex-col overflow-y-auto bg-stone-50">
+
+                {/* AI section */}
+                <div className="p-4 border-b border-stone-200 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold uppercase tracking-wider text-stone-600">
+                      ✦ AI Evaluation
+                    </span>
+                    <AiButton
+                      subId={previewSubmission.id}
+                      hasAi={!!previewSubmission.ai_feedback}
+                      supported={canAiEval(previewSubmission.file_name)}
+                    />
+                  </div>
+
+                  {previewAssignment?.grading_mode && (
+                    <div className="flex flex-wrap gap-1.5 items-center">
+                      <span className={`text-[10px] px-2 py-0.5 rounded border capitalize font-medium ${getModeInfo(previewAssignment.grading_mode).badge}`}>
+                        {previewAssignment.grading_mode}
+                      </span>
+                      {previewAssignment.grading_instructions && (
+                        <span className="text-[10px] text-stone-500 italic truncate max-w-52">
+                          "{previewAssignment.grading_instructions}"
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {previewAssignment?.rubric?.length > 0 && (
+                    <div className="text-[10px] text-stone-500 bg-stone-100 rounded px-2 py-1.5">
+                      <span className="font-semibold">Rubric: </span>
+                      {previewAssignment.rubric.map(r => r.criteria + ' (' + r.max_marks + ')').join(' · ')}
+                    </div>
+                  )}
+
+                  {aiStatus[previewSubmission.id] === 'loading' && (
+                    <div className="text-xs text-blue-600 italic animate-pulse bg-blue-50 p-3 rounded">
+                      Sending to Gemini… may take 10–30 seconds.
+                    </div>
+                  )}
+
+                  {previewSubmission.ai_breakdown?.length > 0 ? (
+                    <BreakdownTable
+                      breakdown={previewSubmission.ai_breakdown}
+                      suggestedMarks={previewSubmission.ai_suggested_marks}
+                      maxMarks={previewAssignment?.max_marks}
+                      feedback={previewSubmission.ai_feedback}
+                    />
+                  ) : previewSubmission.ai_feedback ? (
+                    <div className="bg-blue-50 border border-blue-100 rounded p-3 text-xs">
+                      <div className="font-semibold text-blue-800 mb-1">
+                        Suggested: {previewSubmission.ai_suggested_marks}/{previewAssignment?.max_marks}
+                      </div>
+                      <div className="text-stone-700 leading-relaxed">{previewSubmission.ai_feedback}</div>
+                    </div>
+                  ) : aiStatus[previewSubmission.id] !== 'loading' && (
+                    <div className="text-xs text-stone-400 italic text-center py-3">
+                      {canAiEval(previewSubmission.file_name)
+                        ? 'No evaluation yet. Click "Run AI Eval".'
+                        : 'File type not supported for AI evaluation.'}
+                    </div>
+                  )}
+
+                  {aiStatus[previewSubmission.id] === 'error' && (
+                    <div className="text-xs text-red-600 bg-red-50 border border-red-100 rounded p-2">
+                      AI evaluation failed. Check API key / quota.
+                    </div>
+                  )}
+                </div>
+
+                {/* Grade section */}
+                <div className="p-4 space-y-3">
+                  <div className="text-xs font-bold uppercase tracking-wider text-stone-600">
+                    Grade & Approve
+                  </div>
+
+                  {previewSubmission.grade_status === 'approved' && !previewGrading ? (
+                    <div className="space-y-2">
+                      <div className="bg-green-50 border border-green-200 rounded p-3 text-xs">
+                        <div className="font-semibold text-green-800 mb-1">
+                          ✓ Approved: {previewSubmission.marks_awarded}/{previewAssignment?.max_marks}
+                        </div>
+                        {previewSubmission.feedback && (
+                          <div className="text-stone-600 italic leading-relaxed">{previewSubmission.feedback}</div>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => {
+                          setPreviewGrading(true)
+                          setGradeForm({
+                            marks_awarded: String(previewSubmission.marks_awarded),
+                            feedback: previewSubmission.feedback ?? '',
+                          })
+                        }}
+                        className="w-full py-2 text-xs border border-stone-300 rounded hover:bg-stone-100 transition"
+                      >
+                        Edit grade
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="flex gap-2 items-center">
+                        <input
+                          type="number"
+                          placeholder="Marks"
+                          min="0"
+                          max={previewAssignment?.max_marks}
+                          value={gradeForm.marks_awarded}
+                          onChange={e => setGradeForm({ ...gradeForm, marks_awarded: e.target.value })}
+                          className="flex-1 p-2 border rounded text-sm font-mono"
+                        />
+                        <span className="text-xs text-stone-400 shrink-0">
+                          / {previewAssignment?.max_marks}
+                        </span>
+                      </div>
+                      <textarea
+                        placeholder="Feedback for student..."
+                        value={gradeForm.feedback}
+                        onChange={e => setGradeForm({ ...gradeForm, feedback: e.target.value })}
+                        rows={4}
+                        className="w-full p-2 border rounded text-sm resize-none"
+                      />
+                      <button
+                        onClick={() => saveGradeFromPreview(previewSubmission.id)}
+                        className="w-full py-2 bg-green-700 text-white rounded text-xs hover:bg-green-800 transition font-medium"
+                      >
+                        ✓ Approve & release to student
+                      </button>
+                      {previewGrading && (
+                        <button
+                          onClick={() => setPreviewGrading(false)}
+                          className="w-full py-1.5 text-xs text-stone-500 hover:underline"
+                        >
+                          Cancel
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         </div>
       )}
 
+      {/* ══ MAIN ══ */}
       <main className="max-w-6xl mx-auto px-6 py-10">
-        {/* Tab bar */}
-        <div className="flex gap-2 mb-8 border-b">
-          {[{ key: 'marks', label: 'Marks & Students' }, { key: 'assignments', label: 'Assignments' }].map((t) => (
+
+        {/* Tabs */}
+        <div className="flex gap-2 mb-8 border-b border-stone-200">
+          {[
+            { key: 'marks', label: 'Marks & Students' },
+            { key: 'assignments', label: 'Assignments' },
+          ].map(t => (
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
@@ -269,19 +828,25 @@ export default function ProfessorDashboard() {
 
         {(error || success) && (
           <div className={`mb-6 px-4 py-3 rounded-lg text-sm border ${
-            error ? 'bg-red-50 text-red-800 border-red-200' : 'bg-green-50 text-green-800 border-green-200'
+            error
+              ? 'bg-red-50 text-red-800 border-red-200'
+              : 'bg-green-50 text-green-800 border-green-200'
           }`}>
             {error || success}
           </div>
         )}
 
-        {/* ===================== MARKS TAB ===================== */}
+        {/* ══ MARKS TAB ══ */}
         {tab === 'marks' && (
           <div className="grid lg:grid-cols-3 gap-8">
+
             <section className="space-y-6">
               <h2 className="text-xl font-semibold">My Students</h2>
               <div className="bg-white border rounded-lg divide-y max-h-80 overflow-y-auto">
-                {students.map((s) => (
+                {students.length === 0 && (
+                  <div className="p-6 text-center text-sm text-stone-400">No students yet</div>
+                )}
+                {students.map(s => (
                   <button
                     key={s.id}
                     onClick={() => { setSelected(s); loadMarks(s.id) }}
@@ -293,32 +858,52 @@ export default function ProfessorDashboard() {
                 ))}
               </div>
               <form onSubmit={addStudent} className="bg-white border rounded-lg p-4 space-y-3">
-                <input type="text" placeholder="Name" value={studentForm.name} onChange={(e) => setStudentForm({...studentForm, name: e.target.value})} className="w-full p-2 border rounded text-sm" required />
-                <input type="email" placeholder="Email" value={studentForm.email} onChange={(e) => setStudentForm({...studentForm, email: e.target.value})} className="w-full p-2 border rounded text-sm" required />
-                <input type="password" placeholder="Password" value={studentForm.password} onChange={(e) => setStudentForm({...studentForm, password: e.target.value})} className="w-full p-2 border rounded text-sm" required />
-                <button className="w-full py-2 bg-stone-900 text-white rounded text-sm">Add Student</button>
+                <div className="text-xs uppercase tracking-wider text-stone-500 font-semibold">Add Student</div>
+                <input type="text" placeholder="Full name" value={studentForm.name}
+                  onChange={e => setStudentForm({ ...studentForm, name: e.target.value })}
+                  className="w-full p-2 border rounded text-sm" required />
+                <input type="email" placeholder="Email" value={studentForm.email}
+                  onChange={e => setStudentForm({ ...studentForm, email: e.target.value })}
+                  className="w-full p-2 border rounded text-sm" required />
+                <input type="password" placeholder="Password" value={studentForm.password}
+                  onChange={e => setStudentForm({ ...studentForm, password: e.target.value })}
+                  className="w-full p-2 border rounded text-sm" required />
+                <button className="w-full py-2 bg-stone-900 text-white rounded text-sm hover:bg-stone-700 transition">
+                  Add Student
+                </button>
               </form>
             </section>
 
             <section>
-              <h2 className="text-xl font-semibold mb-4">{selected ? `${selected.name}'s Marks` : 'Select a Student'}</h2>
+              <h2 className="text-xl font-semibold mb-4">
+                {selected ? selected.name + "'s Marks" : 'Select a Student'}
+              </h2>
               {selected && (
                 <div className="space-y-4">
-                  <div className="bg-white border rounded-lg p-4 divide-y">
-                    {marks.map((m) => (
-                      <div key={m.id} className="flex justify-between items-center py-2">
+                  <div className="bg-white border rounded-lg divide-y">
+                    {marks.length === 0 && (
+                      <div className="p-6 text-center text-sm text-stone-400">No marks yet</div>
+                    )}
+                    {marks.map(m => (
+                      <div key={m.id} className="flex justify-between items-center px-4 py-3">
                         <span className="text-sm">{m.subject}</span>
                         <div className="flex gap-3 items-center">
                           {editingMarkId === m.id ? (
                             <>
-                              <input type="number" min="0" max="100" value={editValue} onChange={(e) => setEditValue(e.target.value)} className="w-16 px-2 py-1 border rounded text-sm font-mono" />
-                              <button onClick={() => saveMarkEdit(m.id)} className="text-[10px] bg-stone-900 text-white px-2 py-1 rounded">Save</button>
-                              <button onClick={() => setEditingMarkId(null)} className="text-[10px] underline">X</button>
+                              <input type="number" min="0" max="100" value={editValue}
+                                onChange={e => setEditValue(e.target.value)}
+                                className="w-16 px-2 py-1 border rounded text-sm font-mono" />
+                              <button onClick={() => saveMarkEdit(m.id)}
+                                className="text-[10px] bg-stone-900 text-white px-2 py-1 rounded">Save</button>
+                              <button onClick={() => setEditingMarkId(null)}
+                                className="text-[10px] text-stone-500 hover:underline">Cancel</button>
                             </>
                           ) : (
                             <>
-                              <span className="font-mono text-sm">{m.marks_obtained}</span>
-                              <button onClick={() => { setEditingMarkId(m.id); setEditValue(m.marks_obtained) }} className="text-[10px] underline">Edit</button>
+                              <span className="font-mono text-sm font-semibold">{m.marks_obtained}</span>
+                              <button
+                                onClick={() => { setEditingMarkId(m.id); setEditValue(m.marks_obtained) }}
+                                className="text-[10px] text-stone-500 hover:underline">Edit</button>
                             </>
                           )}
                         </div>
@@ -326,12 +911,19 @@ export default function ProfessorDashboard() {
                     ))}
                   </div>
                   <form onSubmit={addMark} className="bg-white border rounded-lg p-4 space-y-3">
-                    <select value={markForm.subject} onChange={(e) => setMarkForm({...markForm, subject: e.target.value})} className="w-full p-2 border rounded text-sm" required>
-                      <option value="">Subject</option>
+                    <select value={markForm.subject}
+                      onChange={e => setMarkForm({ ...markForm, subject: e.target.value })}
+                      className="w-full p-2 border rounded text-sm" required>
+                      <option value="">Select subject</option>
                       {SUBJECTS.map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
-                    <input type="number" placeholder="Marks" value={markForm.marks_obtained} onChange={(e) => setMarkForm({...markForm, marks_obtained: e.target.value})} className="w-full p-2 border rounded text-sm" required />
-                    <button className="w-full py-2 bg-stone-900 text-white rounded text-sm">Save</button>
+                    <input type="number" placeholder="Marks (0–100)" min="0" max="100"
+                      value={markForm.marks_obtained}
+                      onChange={e => setMarkForm({ ...markForm, marks_obtained: e.target.value })}
+                      className="w-full p-2 border rounded text-sm" required />
+                    <button className="w-full py-2 bg-stone-900 text-white rounded text-sm hover:bg-stone-700 transition">
+                      Add Mark
+                    </button>
                   </form>
                 </div>
               )}
@@ -339,87 +931,199 @@ export default function ProfessorDashboard() {
 
             <section>
               <h2 className="text-xl font-semibold mb-4">Class Standings</h2>
-              {analytics && (
+              {analytics ? (
                 <div className="space-y-4">
-                  <div className="bg-amber-50 border border-amber-200 p-4 rounded-lg">
-                    <div className="text-[10px] uppercase font-bold text-amber-700">Top Performer</div>
-                    <div className="font-bold">{analytics.top_scorer?.name || 'N/A'}</div>
-                  </div>
-                  <div className="bg-white border rounded-lg p-4">
+                  {analytics.top_scorer && (
+                    <div className="bg-amber-50 border border-amber-200 p-4 rounded-lg">
+                      <div className="text-[10px] uppercase font-bold text-amber-700 mb-1">Top Performer</div>
+                      <div className="font-bold text-stone-800">{analytics.top_scorer.name}</div>
+                      <div className="text-xs text-amber-700 font-mono">{analytics.top_scorer.total} pts</div>
+                    </div>
+                  )}
+                  <div className="bg-white border rounded-lg divide-y overflow-hidden">
                     {analytics.all_students?.map((s, i) => (
-                      <div key={s.student_id} className="flex justify-between text-xs py-1.5 border-b last:border-0">
-                        <span>{i + 1}. {s.name}</span>
-                        <span className="font-mono">{s.total}</span>
+                      <div key={s.student_id} className="flex justify-between items-center px-4 py-2.5 text-sm">
+                        <span className="text-stone-600">
+                          <span className="font-mono text-xs text-stone-400 mr-2">{i + 1}.</span>
+                          {s.name}
+                        </span>
+                        <span className="font-mono font-semibold">{s.total}</span>
                       </div>
                     ))}
                   </div>
                 </div>
+              ) : (
+                <div className="text-sm text-stone-400 italic">No marks recorded yet.</div>
               )}
             </section>
           </div>
         )}
 
-        {/* ===================== ASSIGNMENTS TAB ===================== */}
+        {/* ══ ASSIGNMENTS TAB ══ */}
         {tab === 'assignments' && (
           <div className="grid lg:grid-cols-3 gap-8">
-            {/* Post Assignment form */}
-            <section className="space-y-4">
-              <h2 className="text-xl font-semibold">Post Assignment</h2>
-              <form
-                onSubmit={async (e) => {
-                  e.preventDefault()
-                  try {
-                    const { data } = await api.post('/professor/assignments', {
-                      ...assignmentForm,
-                      max_marks: parseInt(assignmentForm.max_marks, 10),
-                    })
-                    setAssignments([data, ...assignments])
-                    flash(setSuccess, 'Posted!')
-                  } catch { flash(setError, 'Failed to post assignment') }
-                }}
-                className="bg-white border rounded-lg p-4 space-y-3"
-              >
-                <input type="text" placeholder="Title" value={assignmentForm.title} onChange={(e) => setAssignmentForm({...assignmentForm, title: e.target.value})} className="w-full p-2 border rounded text-sm" required />
-                <textarea placeholder="Description" value={assignmentForm.description} onChange={(e) => setAssignmentForm({...assignmentForm, description: e.target.value})} className="w-full p-2 border rounded text-sm" />
-                <select value={assignmentForm.subject} onChange={(e) => setAssignmentForm({...assignmentForm, subject: e.target.value})} className="w-full p-2 border rounded text-sm bg-white" required>
+
+            <section>
+              <h2 className="text-xl font-semibold mb-4">Post Assignment</h2>
+              <form onSubmit={postAssignment} className="bg-white border rounded-lg p-4 space-y-4">
+
+                <input type="text" placeholder="Title" value={assignmentForm.title}
+                  onChange={e => setAssignmentForm({ ...assignmentForm, title: e.target.value })}
+                  className="w-full p-2 border rounded text-sm" required />
+
+                <textarea placeholder="Description / task instructions"
+                  value={assignmentForm.description}
+                  onChange={e => setAssignmentForm({ ...assignmentForm, description: e.target.value })}
+                  className="w-full p-2 border rounded text-sm resize-none" rows={2} />
+
+                <select value={assignmentForm.subject}
+                  onChange={e => setAssignmentForm({ ...assignmentForm, subject: e.target.value })}
+                  className="w-full p-2 border rounded text-sm bg-white" required>
                   <option value="">Select subject</option>
                   {SUBJECTS.map(s => <option key={s} value={s}>{s}</option>)}
                 </select>
+
+                <input type="datetime-local" value={assignmentForm.due_date}
+                  onChange={e => setAssignmentForm({ ...assignmentForm, due_date: e.target.value })}
+                  className="w-full p-2 border rounded text-sm" required />
+
+                <input type="number" placeholder="Max marks" min="1" max="1000"
+                  value={assignmentForm.max_marks}
+                  onChange={e => setAssignmentForm({ ...assignmentForm, max_marks: e.target.value })}
+                  className="w-full p-2 border rounded text-sm" required />
+
+                {/* File types */}
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider text-stone-500 mb-1">Allowed file types</div>
-                  <div className="flex flex-wrap gap-2">
-                    {FILE_TYPE_GROUPS.flatMap(g => g.exts).map(ext => (
-                      <button
-                        type="button"
-                        key={ext}
-                        onClick={() => toggleExt(ext)}
+                  <div className="text-[10px] uppercase tracking-wider text-stone-500 mb-2">
+                    Allowed File Types
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {FILE_TYPE_EXTS.map(ext => (
+                      <button type="button" key={ext} onClick={() => toggleExt(ext)}
                         className={`text-[10px] px-2 py-1 rounded border transition ${
                           assignmentForm.allowed_extensions.includes(ext)
                             ? 'bg-stone-900 text-white border-stone-900'
                             : 'bg-white text-stone-600 border-stone-300 hover:border-stone-500'
-                        }`}
-                      >
-                        {ext}
-                        {AI_SUPPORTED_EXTS.has(ext) && (
-                          <span className="ml-1 text-[9px] opacity-60">✦AI</span>
-                        )}
+                        }`}>
+                        {ext}{AI_SUPPORTED_EXTS.has(ext) && <span className="ml-0.5 opacity-50">✦</span>}
                       </button>
                     ))}
                   </div>
-                  <div className="text-[10px] text-stone-400 mt-1">✦AI = supported for AI auto-grading</div>
+                  <div className="text-[10px] text-stone-400 mt-1">✦ = AI-evaluable</div>
                 </div>
-                <input type="datetime-local" value={assignmentForm.due_date} onChange={(e) => setAssignmentForm({...assignmentForm, due_date: e.target.value})} className="w-full p-2 border rounded text-sm" required />
-                <input type="number" placeholder="Max marks" min="1" max="1000" value={assignmentForm.max_marks} onChange={(e) => setAssignmentForm({...assignmentForm, max_marks: e.target.value})} className="w-full p-2 border rounded text-sm" required />
-                <button className="w-full py-2 bg-stone-900 text-white rounded text-sm">Post</button>
+
+                {/* AI Settings */}
+                <div className="border-t pt-4 space-y-4">
+                  <div className="text-xs font-bold uppercase tracking-wider text-stone-600">
+                    ✦ AI Evaluation Settings
+                  </div>
+
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-stone-500 mb-2">Grading Mode</div>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {GRADING_MODES.map(m => (
+                        <button type="button" key={m.value}
+                          onClick={() => setAssignmentForm({ ...assignmentForm, grading_mode: m.value })}
+                          className={`p-2 rounded border text-center transition ${
+                            assignmentForm.grading_mode === m.value
+                              ? m.active + ' border-current'
+                              : 'bg-white text-stone-600 border-stone-200 hover:border-stone-400'
+                          }`}>
+                          <div className="text-xs font-semibold">{m.label}</div>
+                          <div className="text-[9px] mt-0.5 leading-tight opacity-70">{m.desc}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-stone-500 mb-1">
+                      Custom Instructions for AI
+                    </div>
+                    <textarea
+                      placeholder={'e.g. "Check if loops are used. Deduct 10 marks if no comments."'}
+                      value={assignmentForm.grading_instructions}
+                      onChange={e => setAssignmentForm({ ...assignmentForm, grading_instructions: e.target.value })}
+                      rows={3} className="w-full p-2 border rounded text-xs resize-none" />
+                  </div>
+
+                  {/* Rubric builder */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="text-[10px] uppercase tracking-wider text-stone-500">
+                        Rubric (optional)
+                      </div>
+                      {assignmentForm.rubric.length > 0 && (
+                        <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
+                          rubricTotal() === parseInt(assignmentForm.max_marks, 10)
+                            ? 'bg-green-100 text-green-700'
+                            : 'bg-red-100 text-red-600'
+                        }`}>
+                          {rubricTotal()} / {assignmentForm.max_marks}
+                        </span>
+                      )}
+                    </div>
+
+                    {assignmentForm.rubric.length > 0 && (
+                      <div className="mb-2 border rounded overflow-hidden text-xs">
+                        {assignmentForm.rubric.map((r, i) => (
+                          <div key={i}
+                            className="flex items-center justify-between px-3 py-2 border-b last:border-0 bg-white">
+                            <span className="text-stone-700">{r.criteria}</span>
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-stone-500">{r.max_marks} pts</span>
+                              <button type="button" onClick={() => removeRubricRow(i)}
+                                className="text-red-400 hover:text-red-600">✕</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="flex gap-1.5">
+                      <input type="text" placeholder="Criteria name"
+                        value={newRubricRow.criteria}
+                        onChange={e => setNewRubricRow({ ...newRubricRow, criteria: e.target.value })}
+                        onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addRubricRow())}
+                        className="flex-1 p-2 border rounded text-xs" />
+                      <input type="number" placeholder="Pts" min="1"
+                        value={newRubricRow.max_marks}
+                        onChange={e => setNewRubricRow({ ...newRubricRow, max_marks: e.target.value })}
+                        onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addRubricRow())}
+                        className="w-16 p-2 border rounded text-xs font-mono" />
+                      <button type="button" onClick={addRubricRow}
+                        className="px-3 py-2 bg-stone-100 border rounded text-xs hover:bg-stone-200 transition">
+                        + Add
+                      </button>
+                    </div>
+                    {assignmentForm.rubric.length === 0 && (
+                      <div className="text-[10px] text-stone-400 mt-1">
+                        Leave empty → default: Correctness / Code Quality / Documentation
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <button className="w-full py-2.5 bg-stone-900 text-white rounded text-sm hover:bg-stone-700 transition font-medium">
+                  Post Assignment
+                </button>
               </form>
             </section>
 
             {/* Assignments list */}
             <section className="lg:col-span-2 space-y-4">
               <h2 className="text-xl font-semibold">History</h2>
-              {assignments.map((a) => (
+
+              {assignments.length === 0 && (
+                <div className="bg-white border border-dashed border-stone-300 rounded-lg p-8 text-center text-sm text-stone-400">
+                  No assignments posted yet.
+                </div>
+              )}
+
+              {assignments.map(a => (
                 <div key={a.id} className="bg-white border rounded-lg overflow-hidden">
-                  <div className="p-4 flex justify-between items-center">
+
+                  <div className="p-4 flex justify-between items-start gap-4">
                     <button
                       onClick={() => {
                         const next = expandedAssignmentId === a.id ? null : a.id
@@ -428,50 +1132,66 @@ export default function ProfessorDashboard() {
                       }}
                       className="text-left flex-1"
                     >
-                      <div className="font-bold">{a.title}</div>
-                      <div className="text-xs text-stone-500">
+                      <div className="font-bold text-stone-800">{a.title}</div>
+                      <div className="text-xs text-stone-500 mt-0.5">
                         {a.subject} · Due {fmtDate(a.due_date)} · {a.submission_count ?? 0} submission{a.submission_count !== 1 ? 's' : ''}
                       </div>
-                      {a.allowed_extensions?.length > 0 && (
-                        <div className="text-xs text-stone-400 mt-0.5">
-                          Accepts: {a.allowed_extensions.join(', ')}
-                        </div>
-                      )}
+                      <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                        {a.grading_mode && (
+                          <span className={`text-[10px] px-2 py-0.5 rounded border capitalize font-medium ${getModeInfo(a.grading_mode).badge}`}>
+                            {a.grading_mode}
+                          </span>
+                        )}
+                        {a.rubric?.length > 0 && (
+                          <span className="text-[10px] text-stone-400">
+                            Rubric: {a.rubric.map(r => r.criteria).join(' · ')}
+                          </span>
+                        )}
+                        {a.allowed_extensions?.length > 0 && (
+                          <span className="text-[10px] text-stone-400 font-mono">
+                            {a.allowed_extensions.join(', ')}
+                          </span>
+                        )}
+                      </div>
                     </button>
-                    <button onClick={() => deleteAssignment(a.id)} className="text-red-500 text-xs px-2 hover:text-red-700">Delete</button>
+                    <button
+                      onClick={() => deleteAssignment(a.id)}
+                      className="text-red-400 hover:text-red-600 text-xs shrink-0 transition"
+                    >
+                      Delete
+                    </button>
                   </div>
 
                   {expandedAssignmentId === a.id && (
                     <div className="p-4 bg-stone-50 border-t space-y-3">
                       {submissions.length === 0 && (
-                        <div className="text-sm text-stone-500 text-center py-4">No submissions yet.</div>
+                        <div className="text-sm text-stone-400 text-center py-6 italic">No submissions yet.</div>
                       )}
 
-                      {submissions.map((sub) => {
-                        const approved = sub.grade_status === 'approved'
+                      {submissions.map(sub => {
+                        const approved  = sub.grade_status === 'approved'
                         const isGrading = gradingId === sub.id
-                        const status = aiStatus[sub.id]
-                        const aiLoading = status === 'loading'
-                        const hasAiResult = !!(sub.ai_feedback || sub.ai_suggested_marks != null)
-                        const supportedForAi = canAiEval(sub.file_name)
+                        const aiLoading = aiStatus[sub.id] === 'loading'
+                        const hasAi     = !!(sub.ai_feedback || sub.ai_suggested_marks != null)
+                        const supported = canAiEval(sub.file_name)
 
                         return (
                           <div key={sub.id} className="bg-white border rounded-lg overflow-hidden">
-                            {/* Header row */}
+
                             <div className="flex items-center justify-between p-3 border-b border-stone-100">
                               <div className="flex items-center gap-2">
                                 <span className="text-sm font-semibold">{sub.student_name}</span>
-                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium border ${
                                   approved
-                                    ? 'bg-green-100 text-green-700'
-                                    : 'bg-amber-100 text-amber-700'
+                                    ? 'bg-green-100 text-green-700 border-green-200'
+                                    : 'bg-amber-100 text-amber-700 border-amber-200'
                                 }`}>
-                                  {approved ? '✓ Approved' : 'Pending review'}
+                                  {approved ? '✓ Approved' : 'Pending'}
                                 </span>
                               </div>
-                              <div className="flex gap-2 items-center">
+                              <div className="flex gap-2">
                                 <button
-                                  onClick={() => handlePreview(sub.id, sub.file_name)}
+                                  onClick={() => handlePreview(sub, a)}
                                   className="text-xs bg-stone-100 px-3 py-1.5 rounded hover:bg-stone-200 transition"
                                 >
                                   Preview
@@ -481,157 +1201,98 @@ export default function ProfessorDashboard() {
                                     onClick={() => startGrading(sub)}
                                     className="text-xs bg-stone-900 text-white px-3 py-1.5 rounded hover:bg-stone-700 transition"
                                   >
-                                    {approved ? 'Edit grade' : 'Review & approve'}
+                                    {approved ? 'Edit grade' : 'Review'}
                                   </button>
                                 )}
                               </div>
                             </div>
 
-                            {/* Body */}
                             <div className="p-3 space-y-3">
-                              {/* File info */}
-                              <div className="flex items-center gap-2 text-xs text-stone-500">
-                                <span>📎 {sub.file_name}</span>
-                                <span>·</span>
-                                <span>Submitted {fmtDate(sub.submitted_at)}</span>
+                              <div className="text-xs text-stone-400 font-mono">
+                                📎 {sub.file_name} · {fmtDate(sub.submitted_at)}
                               </div>
 
-                              {/* AI Evaluation Section */}
+                              {/* AI section */}
                               <div className="border border-dashed border-stone-200 rounded-lg p-3 space-y-2">
                                 <div className="flex items-center justify-between">
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-[11px] font-semibold uppercase tracking-wider text-stone-500">
-                                      ✦ AI Evaluation
-                                    </span>
-                                    {hasAiResult && !aiLoading && (
-                                      <span className="text-[10px] px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded">
-                                        {sub.ai_suggested_marks != null ? `Suggests ${sub.ai_suggested_marks}/${a.max_marks}` : 'Feedback available'}
-                                      </span>
-                                    )}
-                                    {!supportedForAi && (
-                                      <span className="text-[10px] text-stone-400 italic">
-                                        (file type not supported)
-                                      </span>
-                                    )}
-                                  </div>
-
-                                  {/* AI Evaluate button */}
-                                  {supportedForAi && (
-                                    <button
-                                      onClick={() => runAiEval(sub.id)}
-                                      disabled={aiLoading}
-                                      className={`text-[11px] px-3 py-1.5 rounded border transition flex items-center gap-1.5 ${
-                                        aiLoading
-                                          ? 'bg-blue-50 border-blue-200 text-blue-400 cursor-not-allowed'
-                                          : hasAiResult
-                                          ? 'bg-white border-stone-300 text-stone-600 hover:border-blue-400 hover:text-blue-600'
-                                          : 'bg-blue-600 border-blue-600 text-white hover:bg-blue-700'
-                                      }`}
-                                    >
-                                      {aiLoading ? (
-                                        <>
-                                          <svg className="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24">
-                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                                          </svg>
-                                          Evaluating…
-                                        </>
-                                      ) : hasAiResult ? (
-                                        '↻ Re-evaluate'
-                                      ) : (
-                                        '✦ Run AI Eval'
-                                      )}
-                                    </button>
-                                  )}
+                                  <span className="text-[11px] font-semibold uppercase tracking-wider text-stone-500">
+                                    ✦ AI Evaluation
+                                  </span>
+                                  <AiButton subId={sub.id} hasAi={hasAi} supported={supported} />
                                 </div>
 
-                                {/* AI result display */}
                                 {aiLoading && (
                                   <div className="text-xs text-blue-600 italic animate-pulse">
-                                    Sending to Gemini… this may take 10–30 seconds for PDF files.
+                                    Evaluating… 10–30 seconds for PDF files.
                                   </div>
                                 )}
 
-                                {!aiLoading && hasAiResult && (
+                                {!aiLoading && sub.ai_breakdown?.length > 0 ? (
+                                  <BreakdownTable
+                                    breakdown={sub.ai_breakdown}
+                                    suggestedMarks={sub.ai_suggested_marks}
+                                    maxMarks={a.max_marks}
+                                    feedback={sub.ai_feedback}
+                                  />
+                                ) : !aiLoading && hasAi ? (
                                   <div className="bg-blue-50 rounded p-2.5 text-xs">
                                     {sub.ai_suggested_marks != null && (
                                       <div className="font-semibold text-blue-800 mb-1">
-                                        Suggested marks: <span className="font-mono">{sub.ai_suggested_marks} / {a.max_marks}</span>
+                                        Suggested: {sub.ai_suggested_marks}/{a.max_marks}
                                       </div>
                                     )}
                                     {sub.ai_feedback && (
-                                      <div className="text-stone-700 whitespace-pre-wrap leading-relaxed">
-                                        {sub.ai_feedback}
-                                      </div>
+                                      <div className="text-stone-700 leading-relaxed">{sub.ai_feedback}</div>
                                     )}
                                   </div>
-                                )}
-
-                                {!aiLoading && !hasAiResult && supportedForAi && (
+                                ) : !aiLoading && (
                                   <div className="text-xs text-stone-400 italic">
-                                    No AI evaluation yet. Click "Run AI Eval" to get a suggested grade.
+                                    {supported ? 'No evaluation yet.' : 'File type not supported for AI.'}
                                   </div>
                                 )}
 
-                                {status === 'error' && (
+                                {aiStatus[sub.id] === 'error' && (
                                   <div className="text-xs text-red-600 bg-red-50 border border-red-100 rounded p-2">
-                                    AI evaluation failed. Check your GEMINI_API_KEY or try again.
+                                    AI evaluation failed. Check API key / quota.
                                   </div>
                                 )}
                               </div>
 
-                              {/* Approved grade banner */}
                               {approved && !isGrading && (
                                 <div className="bg-green-50 border border-green-200 rounded p-2.5 text-xs">
                                   <div className="font-semibold text-green-800 mb-1">
-                                    ✓ Approved: <span className="font-mono">{sub.marks_awarded} / {a.max_marks}</span>
+                                    ✓ {sub.marks_awarded}/{a.max_marks}
                                   </div>
                                   {sub.feedback && (
-                                    <div className="text-stone-700 whitespace-pre-wrap">{sub.feedback}</div>
+                                    <div className="text-stone-600 leading-relaxed">{sub.feedback}</div>
                                   )}
                                 </div>
                               )}
 
-                              {/* Grading form */}
                               {isGrading && (
                                 <div className="border-t pt-3 space-y-2">
                                   <div className="text-xs text-stone-500 mb-1">
-                                    {hasAiResult
-                                      ? 'Pre-filled from AI suggestion — edit if needed, then approve.'
-                                      : 'Enter marks and feedback, then approve.'}
+                                    {hasAi ? 'Pre-filled from AI — edit if needed.' : 'Enter marks and feedback.'}
                                   </div>
                                   <div className="flex gap-2 items-center">
-                                    <input
-                                      type="number"
-                                      placeholder={`Marks (0–${a.max_marks})`}
-                                      min="0"
-                                      max={a.max_marks}
+                                    <input type="number" placeholder="Marks"
+                                      min="0" max={a.max_marks}
                                       value={gradeForm.marks_awarded}
-                                      onChange={(e) => setGradeForm({ ...gradeForm, marks_awarded: e.target.value })}
-                                      className="w-36 p-2 border rounded text-sm font-mono"
-                                    />
+                                      onChange={e => setGradeForm({ ...gradeForm, marks_awarded: e.target.value })}
+                                      className="w-28 p-2 border rounded text-sm font-mono" />
                                     <span className="text-xs text-stone-400">/ {a.max_marks}</span>
                                   </div>
-                                  <textarea
-                                    placeholder="Feedback for student"
+                                  <textarea placeholder="Feedback for student"
                                     value={gradeForm.feedback}
-                                    onChange={(e) => setGradeForm({ ...gradeForm, feedback: e.target.value })}
-                                    rows={3}
-                                    className="w-full p-2 border rounded text-sm resize-none"
-                                  />
+                                    onChange={e => setGradeForm({ ...gradeForm, feedback: e.target.value })}
+                                    rows={3} className="w-full p-2 border rounded text-sm resize-none" />
                                   <div className="flex gap-2">
-                                    <button
-                                      onClick={() => saveGrade(sub.id)}
-                                      className="flex-1 py-2 bg-green-700 text-white rounded text-xs hover:bg-green-800 transition"
-                                    >
-                                      ✓ Approve & release to student
+                                    <button onClick={() => saveGrade(sub.id)}
+                                      className="flex-1 py-2 bg-green-700 text-white rounded text-xs hover:bg-green-800 transition font-medium">
+                                      ✓ Approve & release
                                     </button>
-                                    <button
-                                      onClick={() => setGradingId(null)}
-                                      className="px-4 text-xs text-stone-500 hover:underline"
-                                    >
-                                      Cancel
-                                    </button>
+                                    <button onClick={() => setGradingId(null)}
+                                      className="px-3 text-xs text-stone-500 hover:underline">Cancel</button>
                                   </div>
                                 </div>
                               )}
