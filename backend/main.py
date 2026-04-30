@@ -1,14 +1,17 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-from app.routes import admin_router, auth_router, professor_router,assignment_router
-from app.cors.database import Base, engine,get_db
-from app.routes import  student_router
-app = FastAPI()
+from app.routes import admin_router, auth_router, professor_router, assignment_router, student_router
+from app.cors.database import Base, engine
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
+import os
 
 load_dotenv()
+
+key = os.getenv("GEMINI_API_KEY", "NOT FOUND")
+print("[DEBUG] key starts with: '" + key[:8] + "' len=" + str(len(key)))
+
+app = FastAPI()
 
 Base.metadata.create_all(bind=engine)
 
@@ -20,7 +23,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register routers
 app.include_router(auth_router.router)
 app.include_router(admin_router.router)
 app.include_router(professor_router.router)
@@ -30,9 +32,4 @@ app.include_router(assignment_router.router)
 
 @app.get("/")
 def root():
-    return {
-        "message": "server is running",
-      
-    }
-
-
+    return {"message": "server is running"}
