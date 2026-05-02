@@ -21,12 +21,13 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql://smm-user:smm-password@db:5432/smm-db
-      GEMINI_API_KEY: AIzaSyDGofR29HIq3sDsvXAo6Abl5ziLIhalOII
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
     depends_on:
       - db
     volumes:
-      - ./backend/uploads:/app/uploads   # persist uploaded files
+      - ./backend/uploads:/app/uploads
 
+  
   frontend:
     build: ./frontend
     container_name: smm-frontend
