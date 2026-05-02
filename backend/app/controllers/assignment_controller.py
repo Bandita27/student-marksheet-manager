@@ -2,6 +2,7 @@
 import json
 import re
 import time
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -16,8 +17,12 @@ from app.models import admin_model, assignment_model
 from app.schemas.assignment_schemas import AssignmentCreate, GradeUpdate
 
 
-# ── Hardcoded API key ────────────────────────────────────────────────
-GEMINI_API_KEY = "AIzaSyBnJflrFy27dYeHngEgxR8no22dv-d94Z8"  
+# ── API key from environment ─────────────────────────────────────────
+from dotenv import load_dotenv
+load_dotenv()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY is not set. Add it to your .env file.")
 
 print("[AI] key prefix=" + GEMINI_API_KEY[:8] + " len=" + str(len(GEMINI_API_KEY)))
 
@@ -268,7 +273,7 @@ def _run_ai_eval(assignment, submission, db) -> dict | None:
             mime     = _EXT_MIME.get(ext, "application/octet-stream")
             uploaded = client.files.upload(
                 file=str(disk_path),
-                config=genai_types.UploadFileConfig(mime_type=mime),
+                config=genai_types.UploadFileConfig(mime_type=mime),  # type: ignore[call-arg]
             )
             contents: list = [
                 instruction,
@@ -720,6 +725,25 @@ def submit_assignment(
 
 
 # ===================================================================
+# Inline MIME map — types that browsers can render without downloading
+# ===================================================================
+
+_INLINE_MIME: dict[str, str] = {
+    ".pdf":  "application/pdf",
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".txt":  "text/plain",
+    ".md":   "text/plain",
+    ".py":   "text/plain",
+    ".js":   "text/plain",
+    ".java": "text/plain",
+    ".cpp":  "text/plain",
+    ".c":    "text/plain",
+    ".ipynb":"text/plain",
+}
+
+# ===================================================================
 # Auth-checked download
 # ===================================================================
 
@@ -741,4 +765,12 @@ def get_submission_for_download(db: Session, submission_id: int, user_id: int):
     if not disk_path.exists():
         raise HTTPException(status_code=404, detail="File missing on server.")
 
-    return disk_path, str(sub.file_name)
+    file_name = str(sub.file_name)
+    ext = Path(file_name).suffix.lower()
+    # Return media_type and disposition so the router can serve inline.
+    # Files not in _INLINE_MIME (e.g. .zip, .docx) will correctly trigger
+    # a browser download since they cannot be rendered inline.
+    media_type  = _INLINE_MIME.get(ext, "application/octet-stream")
+    disposition = "inline" if ext in _INLINE_MIME else "attachment"
+
+    return disk_path, file_name, media_type, disposition

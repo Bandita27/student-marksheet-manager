@@ -1,5 +1,5 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false, reportGeneralTypeIssues=false
-from fastapi import APIRouter, Depends, UploadFile, File
+from fastapi import APIRouter, Depends, UploadFile, File, Request, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -8,7 +8,18 @@ from app.controllers import assignment_controller
 from app.controllers.admin_controller import (
     get_current_professor,
     get_current_student,
+    decode_access_token,
 )
+
+def _user_id_from_token(request: Request) -> int:
+    """Works for any role — professor or student."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    payload = decode_access_token(auth.split(" ", 1)[1])
+    if not payload or not payload.get("sub"):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return int(payload["sub"])
 from app.schemas.assignment_schemas import (
     AssignmentCreate,
     AssignmentResponse,
@@ -132,34 +143,44 @@ def submit_assignment(
 
 
 # ====================================================================
-# Auth-protected file download (works for both roles)
+# Auth-protected file download — works for BOTH professor and student
 # ====================================================================
 
 @router.get("/submissions/{submission_id}/download")
 def download_submission(
     submission_id: int,
+    request: Request,
     db: Session = Depends(get_db),
-    professor=Depends(get_current_professor),
 ):
-    """Professor downloading a student's submission file."""
-    disk_path, file_name = assignment_controller.get_submission_for_download(
-        db, submission_id, int(professor.id)
+    """
+    Serves the file inline so it renders in the browser (PDF/image/code).
+    Accepts both professor and student JWT tokens.
+    Ownership is verified inside get_submission_for_download().
+    """
+    user_id = _user_id_from_token(request)
+    disk_path, file_name, media_type, disposition = (
+        assignment_controller.get_submission_for_download(db, submission_id, user_id)
     )
     return FileResponse(
-        path=disk_path, filename=file_name, media_type="application/octet-stream"
+        path=disk_path,
+        media_type=media_type,
+        headers={"Content-Disposition": f'{disposition}; filename="{file_name}"'},
     )
 
 
 @router.get("/student/submissions/{submission_id}/download")
 def student_download_submission(
     submission_id: int,
+    request: Request,
     db: Session = Depends(get_db),
-    student=Depends(get_current_student),
 ):
-    """Student downloading their own submission."""
-    disk_path, file_name = assignment_controller.get_submission_for_download(
-        db, submission_id, int(student.id)
+    """Alias kept for student dashboard backward compatibility."""
+    user_id = _user_id_from_token(request)
+    disk_path, file_name, media_type, disposition = (
+        assignment_controller.get_submission_for_download(db, submission_id, user_id)
     )
     return FileResponse(
-        path=disk_path, filename=file_name, media_type="application/octet-stream"
+        path=disk_path,
+        media_type=media_type,
+        headers={"Content-Disposition": f'{disposition}; filename="{file_name}"'},
     )

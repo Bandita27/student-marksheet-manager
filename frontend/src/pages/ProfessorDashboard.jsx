@@ -1,13 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
-import * as pdfjsLib from 'pdfjs-dist'
+import { Document, Page, pdfjs } from 'react-pdf'
+import 'react-pdf/dist/Page/AnnotationLayer.css'
+import 'react-pdf/dist/Page/TextLayer.css'
 import api from '../api.js'
 import Header from '../components/Header.jsx'
 
 // ── PDF.js worker ─────────────────────────────────────────────────────────────
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url
-).toString()
+pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const SUBJECTS = [
@@ -89,85 +88,53 @@ function getModeInfo(value) {
 }
 
 // ── PDF Canvas Viewer ─────────────────────────────────────────────────────────
-// Renders every page of a PDF to <canvas> — never triggers a download
 function PDFViewer({ url }) {
-  const containerRef = useRef(null)
-  const [status, setStatus] = useState('loading') // loading | done | error
-  const [pageCount, setPageCount] = useState(0)
+  const [numPages, setNumPages] = useState(null);
+  const containerRef = useRef(null);
+  const [containerWidth, setContainerWidth] = useState(800); // FIX: sensible default instead of 0
 
+  // Measure container so pages fill the panel width
   useEffect(() => {
-    if (!url) return
-    let cancelled = false
-    setStatus('loading')
-    setPageCount(0)
-
-    ;(async () => {
-      try {
-        const loadingTask = pdfjsLib.getDocument(url)
-        const pdf = await loadingTask.promise
-        if (cancelled) return
-
-        setPageCount(pdf.numPages)
-        const container = containerRef.current
-        if (!container) return
-        container.innerHTML = ''
-
-        for (let i = 1; i <= pdf.numPages; i++) {
-          if (cancelled) return
-          const page = await pdf.getPage(i)
-          const viewport = page.getViewport({ scale: 1.5 })
-
-          const wrapper = document.createElement('div')
-          wrapper.style.cssText = 'margin-bottom:8px;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.15);'
-
-          const canvas = document.createElement('canvas')
-          canvas.width  = viewport.width
-          canvas.height = viewport.height
-          canvas.style.cssText = 'display:block;width:100%;height:auto;'
-
-          wrapper.appendChild(canvas)
-          container.appendChild(wrapper)
-
-          await page.render({
-            canvasContext: canvas.getContext('2d'),
-            viewport,
-          }).promise
-        }
-
-        if (!cancelled) setStatus('done')
-      } catch (err) {
-        if (!cancelled) { console.error('PDF render error:', err); setStatus('error') }
-      }
-    })()
-
-    return () => { cancelled = true }
-  }, [url])
+    if (!containerRef.current) return;
+    const obs = new ResizeObserver(([entry]) => {
+      setContainerWidth(Math.floor(entry.contentRect.width));
+    });
+    obs.observe(containerRef.current);
+    return () => obs.disconnect();
+  }, []);
 
   return (
-    <div className="w-full h-full overflow-auto bg-stone-200 p-4">
-      {status === 'loading' && (
-        <div className="flex flex-col items-center justify-center h-40 gap-2">
-          <svg className="animate-spin w-6 h-6 text-stone-400" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-          </svg>
-          <span className="text-stone-400 text-sm">Rendering PDF...</span>
-        </div>
-      )}
-      {status === 'error' && (
-        <div className="flex flex-col items-center justify-center h-40 gap-3 text-red-500">
-          <span className="text-sm">Failed to render PDF.</span>
-          <span className="text-xs text-stone-400">The file may be corrupted or password-protected.</span>
-        </div>
-      )}
-      <div ref={containerRef} />
-      {status === 'done' && pageCount > 0 && (
-        <div className="text-center text-xs text-stone-400 mt-2 pb-2">
-          {pageCount} page{pageCount !== 1 ? 's' : ''}
+    <div ref={containerRef} className="w-full h-full overflow-auto bg-stone-200 p-4">
+      {/* Ensure we only render the Document if the URL exists */}
+      {url ? (
+        <Document
+          file={url}
+          onLoadSuccess={({ numPages }) => setNumPages(numPages)}
+          onLoadError={(error) => console.error('PDF load error:', error)}
+          loading={
+            <div className="flex items-center justify-center h-40 text-stone-400 text-sm animate-pulse">
+              Loading PDF...
+            </div>
+          }
+        >
+          {Array.from({ length: numPages || 0 }, (_, i) => (
+            <div key={i} className="mb-4 shadow-md bg-white">
+              <Page 
+                pageNumber={i + 1} 
+                width={containerWidth > 40 ? containerWidth - 40 : 600} 
+                renderTextLayer={true}
+                renderAnnotationLayer={true}
+              />
+            </div>
+          ))}
+        </Document>
+      ) : (
+        <div className="flex items-center justify-center h-full text-stone-400">
+          No document selected.
         </div>
       )}
     </div>
-  )
+  );
 }
 
 // ── Code Viewer ───────────────────────────────────────────────────────────────

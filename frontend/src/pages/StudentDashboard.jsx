@@ -109,9 +109,9 @@ export default function StudentDashboard() {
   }
 
   function statusOf(a) {
-  if (a.marks_awarded != null && a.grade_status === 'approved') return 'graded'
-  if (a.submitted_at) return 'submitted'
-  return 'pending'
+    if (a.marks_awarded != null && a.grade_status === 'approved') return 'graded'
+    if (a.submitted_at) return 'submitted'
+    return 'pending'
   }
 
   function dueState(a) {
@@ -412,6 +412,7 @@ export default function StudentDashboard() {
                                     Need to update? Upload a new file to replace this submission.
                                   </div>
                                   <input
+                                    ref={fileInputRef}
                                     type="file"
                                     onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
                                     className="block w-full text-xs text-stone-700

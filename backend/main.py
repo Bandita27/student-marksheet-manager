@@ -29,6 +29,10 @@ app.include_router(professor_router.router)
 app.include_router(student_router.router)
 app.include_router(assignment_router.router)
 
+# Serve uploaded files statically (needed for react-pdf to load via blob URL fallback)
+import os
+os.makedirs("uploads/submissions", exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 @app.get("/")
 def root():

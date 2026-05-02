@@ -21,7 +21,7 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql://smm-user:smm-password@db:5432/smm-db
-      GEMINI_API_KEY: AIzaSyBnJflrFy27dYeHngEgxR8no22dv-d94Z8
+      GEMINI_API_KEY: AIzaSyDGofR29HIq3sDsvXAo6Abl5ziLIhalOII
     depends_on:
       - db
     volumes:
